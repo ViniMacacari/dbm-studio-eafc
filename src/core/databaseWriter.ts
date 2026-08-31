@@ -2,12 +2,23 @@ import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import type { DataTable, DbProject, FieldDescriptor, LocalizationProject, TableDescriptor } from "../shared/types";
 
 const databaseHeader = Buffer.from([0x44, 0x42, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00]);
+const emptyCompressedStringOffset = -1;
 const noCompressedStringBlockLength = 0xffffffff;
+const tableHeaderSize = 36;
 
 interface WritableField extends FieldDescriptor {
+  shortName: string;
   bitOffset: number;
   depth: number;
   dbFieldType: number;
+}
+
+interface TableReference {
+  shortName: string;
+  offset: number;
+  offsetPosition: number;
+  tableStart: number;
+  layout?: TableWriteLayout;
 }
 
 interface TableWriteLayout {
@@ -17,26 +28,23 @@ interface TableWriteLayout {
   recordsCountOffset: number;
   validRecordsCountOffset: number;
   compressedStringLengthOffset: number;
+  storedCompressedStringLength: number;
   compressedStringLength: number;
   recordsCount: number;
   validRecordsCount: number;
   recordSize: number;
   fields: WritableField[];
   recordsOffset: number;
-  capacity: number;
+  recordsCrcOffset: number;
   hasCompressedStrings: boolean;
-}
-
-interface TableReference {
-  shortName: string;
-  offset: number;
-  offsetPosition: number;
-  tableStart: number;
 }
 
 interface WritableLayoutParse {
   databaseStart: number;
-  dbSize: number;
+  databaseEnd: number;
+  databaseSize: number;
+  tablesStartOffset: number;
+  directoryCrcOffset: number;
   tableRefs: TableReference[];
   layouts: TableWriteLayout[];
   warnings: string[];
@@ -49,24 +57,43 @@ interface SaveDatabaseResult {
   tablesWritten: number;
 }
 
+interface HuffmanCodec {
+  tree: Buffer;
+  codes: Array<number[] | undefined>;
+  raw: boolean;
+}
+
 function readShortName(buffer: Buffer, offset: number): string {
   return buffer.subarray(offset, offset + 4).toString("latin1");
+}
+
+function roundUp(value: number, alignment: number): number {
+  return (value + alignment - 1) & ~(alignment - 1);
 }
 
 function normalizeCompressedStringLength(length: number): number {
   return length === noCompressedStringBlockLength ? 0 : length;
 }
 
-function descriptorMaps(descriptors: TableDescriptor[]): {
-  byShortName: Map<string, TableDescriptor>;
-} {
+function computeDbCrc(bytes: Buffer): number {
+  let crc = -1;
+  for (const byte of bytes) {
+    crc = (crc ^ (byte << 24)) | 0;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = ((crc << 1) ^ (crc < 0 ? 0x04c11db7 : 0)) | 0;
+    }
+  }
+  return crc >>> 0;
+}
+
+function descriptorMaps(descriptors: TableDescriptor[]): Map<string, TableDescriptor> {
   const byShortName = new Map<string, TableDescriptor>();
   for (const descriptor of descriptors) {
     if (descriptor.shortName) {
       byShortName.set(descriptor.shortName, descriptor);
     }
   }
-  return { byShortName };
+  return byShortName;
 }
 
 function kindFromDbFieldType(dbFieldType: number, xmlField?: FieldDescriptor): FieldDescriptor["kind"] {
@@ -89,113 +116,87 @@ function kindFromDbFieldType(dbFieldType: number, xmlField?: FieldDescriptor): F
 function parseWritableLayouts(dbBuffer: Buffer, descriptors: TableDescriptor[]): WritableLayoutParse {
   const databaseStart = dbBuffer.indexOf(databaseHeader);
   if (databaseStart < 0) {
-    throw new Error("Raw FIFA database header was not found. Save supports only uncompressed DB files opened successfully by the binary reader.");
+    throw new Error("Raw PC FIFA database header was not found.");
   }
-
-  const warnings: string[] = [];
-  const sizeOffset = databaseStart + databaseHeader.length;
-  if (sizeOffset + 4 > dbBuffer.length) {
+  if (databaseStart + 24 > dbBuffer.length) {
     throw new Error("Database header is truncated.");
   }
 
-  const dbSize = dbBuffer.readUInt32LE(sizeOffset);
-  const databaseEnd = Math.min(databaseStart + dbSize, dbBuffer.length);
-  if (databaseEnd <= databaseStart || databaseEnd > dbBuffer.length) {
+  const warnings: string[] = [];
+  const databaseSize = dbBuffer.readUInt32LE(databaseStart + 8);
+  const databaseEnd = databaseStart + databaseSize;
+  if (databaseSize < 24 || databaseEnd > dbBuffer.length) {
     throw new Error("Database size header is invalid.");
   }
 
-  let cursor = sizeOffset;
-  const declaredSize = dbBuffer.readUInt32LE(cursor);
-  cursor += 4;
-  if (databaseStart + declaredSize > dbBuffer.length) {
-    warnings.push(`Database size header says ${declaredSize} bytes, but the selected file has ${dbBuffer.length - databaseStart} bytes.`);
-  }
-
-  cursor += 4;
-  if (cursor + 8 > databaseEnd) {
-    throw new Error("Database table directory is truncated.");
-  }
-  const tableCount = dbBuffer.readUInt32LE(cursor);
-  cursor += 4;
-  cursor += 4;
-
+  const tableCount = dbBuffer.readUInt32LE(databaseStart + 16);
+  let cursor = databaseStart + 24;
   const tableRefs: TableReference[] = [];
   for (let index = 0; index < tableCount; index += 1) {
     if (cursor + 8 > databaseEnd) {
-      warnings.push("Table directory ended earlier than expected.");
-      break;
+      throw new Error("Database table directory is truncated.");
     }
-    const offset = dbBuffer.readUInt32LE(cursor + 4);
     tableRefs.push({
       shortName: readShortName(dbBuffer, cursor),
-      offset,
+      offset: dbBuffer.readUInt32LE(cursor + 4),
       offsetPosition: cursor + 4,
       tableStart: 0
     });
     cursor += 8;
   }
 
-  cursor += 4;
-  const tablesStartOffset = cursor;
-  tableRefs.forEach((tableRef) => {
+  const directoryCrcOffset = cursor;
+  if (directoryCrcOffset + 4 > databaseEnd) {
+    throw new Error("Database table directory CRC is truncated.");
+  }
+  const tablesStartOffset = directoryCrcOffset + 4;
+  for (const tableRef of tableRefs) {
     tableRef.tableStart = tablesStartOffset + tableRef.offset;
-  });
+  }
+
   const tableStarts = tableRefs
     .map((tableRef) => tableRef.tableStart)
     .filter((offset) => offset >= tablesStartOffset && offset < databaseEnd)
     .sort((left, right) => left - right);
-
   const nextTableStart = (tableStart: number): number => tableStarts.find((offset) => offset > tableStart) ?? databaseEnd;
-  const { byShortName } = descriptorMaps(descriptors);
+  const descriptorsByShortName = descriptorMaps(descriptors);
   const layouts: TableWriteLayout[] = [];
 
   for (const tableRef of tableRefs) {
-    const descriptor = byShortName.get(tableRef.shortName);
-    if (!descriptor) {
-      warnings.push(`Unknown DB table shortname ${tableRef.shortName}.`);
-      continue;
-    }
-
+    const descriptor = descriptorsByShortName.get(tableRef.shortName);
     const tableStart = tableRef.tableStart;
-    if (tableStart < tablesStartOffset || tableStart + 32 > databaseEnd) {
-      warnings.push(`${descriptor.name}: table header is outside the database buffer.`);
+    const tableEnd = nextTableStart(tableStart);
+    const tableName = descriptor?.name ?? tableRef.shortName;
+    if (tableStart < tablesStartOffset || tableStart + tableHeaderSize > tableEnd || tableEnd > databaseEnd) {
+      warnings.push(`${tableName}: table boundaries are invalid; its bytes will be preserved unchanged.`);
       continue;
     }
 
-    let tableCursor = tableStart;
-    tableCursor += 4;
-    const recordSize = dbBuffer.readUInt32LE(tableCursor);
-    tableCursor += 4;
-    tableCursor += 4;
-    const compressedStringLengthOffset = tableCursor;
-    const compressedStringLength = normalizeCompressedStringLength(dbBuffer.readUInt32LE(tableCursor));
-    tableCursor += 4;
-    const recordsCountOffset = tableCursor;
-    const recordsCount = dbBuffer.readUInt16LE(tableCursor);
-    tableCursor += 2;
-    const validRecordsCountOffset = tableCursor;
-    const validRecordsCount = dbBuffer.readUInt16LE(tableCursor);
-    tableCursor += 2;
-    tableCursor += 4;
-    const fieldsCount = dbBuffer.readUInt8(tableCursor);
-    tableCursor += 1;
-    tableCursor += 11;
-
-    const xmlFieldsByShortName = new Map(descriptor.fields.filter((field) => field.shortName).map((field) => [field.shortName as string, field]));
+    const recordSize = dbBuffer.readUInt32LE(tableStart + 4);
+    const compressedStringLengthOffset = tableStart + 12;
+    const storedCompressedStringLength = dbBuffer.readUInt32LE(compressedStringLengthOffset);
+    const compressedStringLength = normalizeCompressedStringLength(storedCompressedStringLength);
+    const recordsCountOffset = tableStart + 16;
+    const recordsCount = dbBuffer.readUInt16LE(recordsCountOffset);
+    const validRecordsCountOffset = tableStart + 18;
+    const validRecordsCount = dbBuffer.readUInt16LE(validRecordsCountOffset);
+    const fieldsCount = dbBuffer.readUInt8(tableStart + 24);
+    let fieldCursor = tableStart + tableHeaderSize;
+    const xmlFieldsByShortName = new Map(
+      (descriptor?.fields ?? []).filter((field) => field.shortName).map((field) => [field.shortName as string, field])
+    );
     const fields: WritableField[] = [];
 
     for (let fieldIndex = 0; fieldIndex < fieldsCount; fieldIndex += 1) {
-      if (tableCursor + 16 > databaseEnd) {
-        warnings.push(`${descriptor.name}: field directory ended earlier than expected.`);
+      if (fieldCursor + 16 > tableEnd) {
+        warnings.push(`${tableName}: field directory is truncated; its bytes will be preserved unchanged.`);
+        fields.length = 0;
         break;
       }
-
-      const dbFieldType = dbBuffer.readUInt32LE(tableCursor);
-      const bitOffset = dbBuffer.readUInt32LE(tableCursor + 4);
-      const shortName = readShortName(dbBuffer, tableCursor + 8);
-      const depth = dbBuffer.readUInt32LE(tableCursor + 12);
-      tableCursor += 16;
-
+      const dbFieldType = dbBuffer.readUInt32LE(fieldCursor);
+      const bitOffset = dbBuffer.readUInt32LE(fieldCursor + 4);
+      const shortName = readShortName(dbBuffer, fieldCursor + 8);
+      const depth = dbBuffer.readUInt32LE(fieldCursor + 12);
       const xmlField = xmlFieldsByShortName.get(shortName);
       fields.push({
         name: xmlField?.name ?? shortName,
@@ -208,31 +209,55 @@ function parseWritableLayouts(dbBuffer: Buffer, descriptors: TableDescriptor[]):
         dbFieldType,
         raw: xmlField?.raw
       });
+      fieldCursor += 16;
     }
 
+    if (fields.length !== fieldsCount) {
+      continue;
+    }
     fields.sort((left, right) => left.bitOffset - right.bitOffset);
-    const recordsOffset = tableCursor;
-    const tableEnd = nextTableStart(tableStart);
+    const recordsOffset = fieldCursor;
+    const paddedCompressedLength = compressedStringLength > 0 ? roundUp(compressedStringLength, 8) : 0;
+    const recordsCrcOffset = recordsOffset + recordsCount * recordSize + paddedCompressedLength;
+    if (recordsCrcOffset + 4 > tableEnd) {
+      warnings.push(`${tableName}: records or compressed strings exceed the table boundary; its bytes will be preserved unchanged.`);
+      continue;
+    }
 
-    layouts.push({
-      name: descriptor.name,
+    const layout: TableWriteLayout = {
+      name: tableName,
       tableStart,
       tableEnd,
       recordsCountOffset,
       validRecordsCountOffset,
       compressedStringLengthOffset,
+      storedCompressedStringLength,
       compressedStringLength,
       recordsCount,
       validRecordsCount,
       recordSize,
       fields,
       recordsOffset,
-      capacity: recordsCount,
-      hasCompressedStrings: compressedStringLength > 0 || fields.some((field) => field.dbFieldType === 13 || field.dbFieldType === 14)
-    });
+      recordsCrcOffset,
+      hasCompressedStrings: fields.some(isCompressedStringField)
+    };
+    tableRef.layout = layout;
+    layouts.push(layout);
+    if (!descriptor) {
+      warnings.push(`Unknown DB table shortname ${tableRef.shortName}; its data was preserved.`);
+    }
   }
 
-  return { databaseStart, dbSize, tableRefs, layouts, warnings };
+  return {
+    databaseStart,
+    databaseEnd,
+    databaseSize,
+    tablesStartOffset,
+    directoryCrcOffset,
+    tableRefs,
+    layouts,
+    warnings
+  };
 }
 
 function parseInteger(value: string, context: string): bigint {
@@ -244,40 +269,28 @@ function parseInteger(value: string, context: string): bigint {
 }
 
 function writeUnsignedBitsLE(record: Buffer, bitOffset: number, depth: number, value: bigint, context: string): void {
-  if (depth <= 0) {
-    throw new Error(`${context}: invalid bit depth ${depth}.`);
+  if (depth <= 0 || bitOffset < 0 || bitOffset + depth > record.length * 8) {
+    throw new Error(`${context}: field is outside the record buffer.`);
   }
-  if (value < 0n) {
-    throw new Error(`${context}: value is below the field range.`);
-  }
-  const maxValue = 1n << BigInt(depth);
-  if (value >= maxValue) {
+  if (value < 0n || value >= (1n << BigInt(depth))) {
     throw new Error(`${context}: value does not fit in ${depth} bits.`);
   }
 
   for (let bit = 0; bit < depth; bit += 1) {
     const targetBit = bitOffset + bit;
-    const byteIndex = targetBit >> 3;
-    if (byteIndex >= record.length) {
-      throw new Error(`${context}: field is outside the record buffer.`);
-    }
     const mask = 1 << (targetBit & 7);
-    record[byteIndex] &= ~mask;
+    const byteIndex = targetBit >> 3;
     if (((value >> BigInt(bit)) & 1n) === 1n) {
       record[byteIndex] |= mask;
+    } else {
+      record[byteIndex] &= ~mask;
     }
   }
 }
 
 function encodeFixedString(value: string, byteLength: number): Buffer {
-  const clean = value.replace(/\\n/g, "\n");
-  let end = clean.length;
-  while (end > 0 && Buffer.byteLength(clean.slice(0, end), "utf8") > byteLength) {
-    end -= 1;
-  }
-
   const output = Buffer.alloc(byteLength);
-  Buffer.from(clean.slice(0, end), "utf8").copy(output);
+  Buffer.from(value, "utf8").subarray(0, byteLength).copy(output);
   return output;
 }
 
@@ -285,7 +298,7 @@ function writeDbField(record: Buffer, field: WritableField, value: string, conte
   switch (field.dbFieldType) {
     case 0: {
       const byteOffset = field.bitOffset >> 3;
-      const byteLength = Math.ceil(field.depth / 8);
+      const byteLength = Math.floor(field.depth / 8);
       if (byteOffset + byteLength > record.length) {
         throw new Error(`${context}: string field is outside the record buffer.`);
       }
@@ -309,16 +322,9 @@ function writeDbField(record: Buffer, field: WritableField, value: string, conte
       record.writeFloatLE(numeric, byteOffset);
       return;
     }
-    case 13: {
-      const raw = parseInteger(value, context);
-      writeUnsignedBitsLE(record, field.bitOffset, 32, raw, context);
-      return;
-    }
-    case 14: {
-      const raw = parseInteger(value, context);
-      writeUnsignedBitsLE(record, field.bitOffset, 64, raw, context);
-      return;
-    }
+    case 13:
+    case 14:
+      throw new Error(`${context}: compressed string must be written through its table codec.`);
     default: {
       const raw = parseInteger(value, context);
       writeUnsignedBitsLE(record, field.bitOffset, field.depth, raw, context);
@@ -326,170 +332,41 @@ function writeDbField(record: Buffer, field: WritableField, value: string, conte
   }
 }
 
-function fieldFitsRecord(field: WritableField, recordSize: number): boolean {
-  if (field.depth <= 0 || field.bitOffset < 0) {
-    return false;
-  }
-
-  switch (field.dbFieldType) {
-    case 0: {
-      const byteOffset = field.bitOffset >> 3;
-      const byteLength = Math.ceil(field.depth / 8);
-      return byteOffset + byteLength <= recordSize;
-    }
-    case 4: {
-      const byteOffset = field.bitOffset >> 3;
-      return byteOffset + 4 <= recordSize;
-    }
-    case 13:
-    case 14:
-      return false;
-    default:
-      return field.bitOffset + field.depth <= recordSize * 8;
-  }
-}
-
 function isCompressedStringField(field: WritableField): boolean {
   return field.dbFieldType === 13 || field.dbFieldType === 14;
 }
 
-interface HuffmanBuildNode {
-  frequency: number;
-  minimumByte: number;
-  byte?: number;
-  left?: HuffmanBuildNode;
-  right?: HuffmanBuildNode;
-}
-
-interface HuffmanCodec {
-  tree: Buffer;
-  codes: Array<number[] | undefined>;
-  raw: boolean;
-}
-
 function compressedStringBytes(value: string, longString: boolean, context: string): Buffer {
-  const bytes = Buffer.from(value.replace(/\\n/g, "\n"), "utf8");
-  if (longString) {
-    if (bytes.length > 0xffff) {
-      throw new Error(`${context}: compressed string is longer than 65535 bytes.`);
-    }
-    return bytes;
-  }
-
-  if (bytes.length > 0xff) {
-    throw new Error(`${context}: compressed string is longer than 255 bytes.`);
+  const bytes = Buffer.from(value, "utf8");
+  const maximum = longString ? 0xffff : 0xff;
+  if (bytes.length > maximum) {
+    throw new Error(`${context}: compressed string is longer than ${maximum} bytes.`);
   }
   return bytes;
 }
 
-function buildHuffmanCodec(values: Buffer[]): HuffmanCodec {
-  const frequencies = new Array<number>(256).fill(0);
-  for (const value of values) {
-    for (const byte of value) {
-      frequencies[byte] += 1;
-    }
-  }
-
-  let nodes: HuffmanBuildNode[] = frequencies
-    .map((frequency, byte): HuffmanBuildNode | undefined => frequency > 0 ? { frequency, minimumByte: byte, byte } : undefined)
-    .filter((node): node is HuffmanBuildNode => Boolean(node));
-  if (nodes.length === 0) {
-    return { tree: Buffer.alloc(0), codes: [], raw: false };
-  }
-
-  if (nodes.length === 1) {
-    const onlyByte = nodes[0].byte as number;
-    const codes: Array<number[] | undefined> = [];
-    codes[onlyByte] = [0];
-    return {
-      tree: Buffer.from([0, onlyByte, 0, onlyByte]),
-      codes,
-      raw: false
-    };
-  }
-
-  while (nodes.length > 1) {
-    nodes.sort((left, right) => left.frequency - right.frequency || left.minimumByte - right.minimumByte);
-    const left = nodes.shift() as HuffmanBuildNode;
-    const right = nodes.shift() as HuffmanBuildNode;
-    nodes.push({
-      frequency: left.frequency + right.frequency,
-      minimumByte: Math.min(left.minimumByte, right.minimumByte),
-      left,
-      right
-    });
-  }
-
-  const root = nodes[0];
-  const internalNodes: HuffmanBuildNode[] = [root];
-  for (let index = 0; index < internalNodes.length; index += 1) {
-    const node = internalNodes[index];
-    if (node.left?.byte === undefined) {
-      internalNodes.push(node.left as HuffmanBuildNode);
-    }
-    if (node.right?.byte === undefined) {
-      internalNodes.push(node.right as HuffmanBuildNode);
-    }
-  }
-  if (internalNodes.length > 255) {
-    throw new Error("Compressed string Huffman tree has more than 255 internal nodes.");
-  }
-
-  const nodeIndexes = new Map(internalNodes.map((node, index) => [node, index]));
-  const tree = Buffer.alloc(internalNodes.length * 4);
-  for (let index = 0; index < internalNodes.length; index += 1) {
-    const children = [internalNodes[index].left, internalNodes[index].right];
-    for (let direction = 0; direction < 2; direction += 1) {
-      const child = children[direction] as HuffmanBuildNode;
-      const treeOffset = index * 4 + direction * 2;
-      if (child.byte !== undefined) {
-        tree[treeOffset] = 0;
-        tree[treeOffset + 1] = child.byte;
-      } else {
-        tree[treeOffset] = nodeIndexes.get(child) as number;
-      }
-    }
-  }
-
-  const codes: Array<number[] | undefined> = [];
-  const visit = (node: HuffmanBuildNode, code: number[]): void => {
-    if (node.byte !== undefined) {
-      codes[node.byte] = code;
-      return;
-    }
-    visit(node.left as HuffmanBuildNode, [...code, 0]);
-    visit(node.right as HuffmanBuildNode, [...code, 1]);
-  };
-  visit(root, []);
-  return { tree, codes, raw: false };
-}
-
 function readExistingHuffmanCodec(dbBuffer: Buffer, layout: TableWriteLayout): HuffmanCodec | undefined {
-  if (layout.compressedStringLength <= 0) {
+  if (!layout.hasCompressedStrings || layout.recordsCount === 0 || layout.compressedStringLength <= 0) {
     return undefined;
   }
 
   const blockOffset = layout.recordsOffset + layout.recordsCount * layout.recordSize;
   const blockEnd = blockOffset + layout.compressedStringLength;
-  if (blockOffset < 0 || blockEnd > dbBuffer.length) {
+  if (blockEnd > layout.tableEnd) {
     return undefined;
   }
 
   let treeSize = Number.MAX_SAFE_INTEGER;
-  const readableRecords = Math.min(layout.recordsCount, layout.validRecordsCount);
-  for (let rowIndex = 0; rowIndex < readableRecords; rowIndex += 1) {
+  for (let rowIndex = 0; rowIndex < layout.recordsCount; rowIndex += 1) {
     const recordOffset = layout.recordsOffset + rowIndex * layout.recordSize;
     const record = dbBuffer.subarray(recordOffset, recordOffset + layout.recordSize);
-    for (const field of layout.fields) {
-      if (!isCompressedStringField(field)) {
-        continue;
-      }
+    for (const field of layout.fields.filter(isCompressedStringField)) {
       const byteOffset = field.bitOffset >> 3;
       if (byteOffset + 4 > record.length) {
         continue;
       }
-      const stringOffset = record.readUInt32LE(byteOffset);
-      if (stringOffset < treeSize) {
+      const stringOffset = record.readInt32LE(byteOffset);
+      if (stringOffset >= 0 && stringOffset < treeSize) {
         treeSize = stringOffset;
       }
     }
@@ -506,13 +383,9 @@ function readExistingHuffmanCodec(dbBuffer: Buffer, layout: TableWriteLayout): H
   const nodeCount = tree.length / 4;
   const codes: Array<number[] | undefined> = [];
   const visiting = new Set<number>();
-  const visited = new Set<number>();
   const visit = (nodeIndex: number, prefix: number[]): boolean => {
     if (nodeIndex < 0 || nodeIndex >= nodeCount || visiting.has(nodeIndex)) {
       return false;
-    }
-    if (visited.has(nodeIndex)) {
-      return true;
     }
     visiting.add(nodeIndex);
     for (let direction = 0; direction < 2; direction += 1) {
@@ -531,83 +404,19 @@ function readExistingHuffmanCodec(dbBuffer: Buffer, layout: TableWriteLayout): H
       }
     }
     visiting.delete(nodeIndex);
-    visited.add(nodeIndex);
     return true;
   };
 
   return visit(0, []) ? { tree, codes, raw: false } : undefined;
 }
 
-function codecSupports(codec: HuffmanCodec, values: Buffer[]): boolean {
-  if (codec.raw) {
-    return true;
-  }
-  return values.every((value) => [...value].every((byte) => Boolean(codec.codes[byte])));
-}
-
-function extendHuffmanCodec(codec: HuffmanCodec, values: Buffer[]): HuffmanCodec | undefined {
-  if (codec.raw || codecSupports(codec, values)) {
-    return codec;
-  }
-
-  const frequencies = new Array<number>(256).fill(0);
-  for (const value of values) {
-    for (const byte of value) {
-      frequencies[byte] += 1;
-    }
-  }
-  const missingBytes = frequencies
-    .map((frequency, byte) => ({ frequency, byte }))
-    .filter(({ frequency, byte }) => frequency > 0 && !codec.codes[byte])
-    .map(({ byte }) => byte);
-
-  let tree = Buffer.from(codec.tree);
-  const codes = codec.codes.map((code) => code ? [...code] : undefined);
-  for (const missingByte of missingBytes) {
-    const anchorByte = codes
-      .map((code, byte) => ({ code, byte }))
-      .filter((entry): entry is { code: number[]; byte: number } => Boolean(entry.code))
-      .sort((left, right) => frequencies[left.byte] - frequencies[right.byte] || left.byte - right.byte)[0]?.byte;
-    const anchorCode = anchorByte === undefined ? undefined : codes[anchorByte];
-    const newNodeIndex = tree.length / 4;
-    if (anchorByte === undefined || !anchorCode || newNodeIndex <= 0 || newNodeIndex >= 255) {
-      return undefined;
-    }
-
-    let nodeIndex = 0;
-    let leafOffset = -1;
-    for (let codeIndex = 0; codeIndex < anchorCode.length; codeIndex += 1) {
-      const direction = anchorCode[codeIndex];
-      const offset = nodeIndex * 4 + direction * 2;
-      const childIndex = tree[offset];
-      if (codeIndex === anchorCode.length - 1) {
-        if (childIndex !== 0 || tree[offset + 1] !== anchorByte) {
-          return undefined;
-        }
-        leafOffset = offset;
-      } else {
-        if (childIndex === 0) {
-          return undefined;
-        }
-        nodeIndex = childIndex;
-      }
-    }
-    if (leafOffset < 0) {
-      return undefined;
-    }
-
-    const extendedTree = Buffer.concat([tree, Buffer.from([0, anchorByte, 0, missingByte])]);
-    extendedTree[leafOffset] = newNodeIndex;
-    extendedTree[leafOffset + 1] = 0;
-    tree = extendedTree;
-    codes[anchorByte] = [...anchorCode, 0];
-    codes[missingByte] = [...anchorCode, 1];
-  }
-
-  return { tree, codes, raw: false };
-}
-
-function encodeCompressedString(bytes: Buffer, longString: boolean, codec: HuffmanCodec, context: string): Buffer {
+function encodeCompressedString(
+  bytes: Buffer,
+  longString: boolean,
+  codec: HuffmanCodec,
+  context: string,
+  substitutedBytes: Set<number>
+): Buffer {
   const prefixLength = longString ? 2 : 1;
   if (codec.raw) {
     const output = Buffer.alloc(prefixLength + bytes.length);
@@ -620,24 +429,30 @@ function encodeCompressedString(bytes: Buffer, longString: boolean, codec: Huffm
     return output;
   }
 
+  const codes: number[][] = [];
   let bitLength = 0;
   for (const byte of bytes) {
-    const code = codec.codes[byte];
+    const code = codec.codes[byte] ?? codec.codes[0x20];
     if (!code) {
-      throw new Error(`${context}: byte ${byte} is missing from the compressed string Huffman tree.`);
+      throw new Error(`${context}: byte ${byte} is missing from the Huffman tree and no space fallback exists.`);
     }
+    if (!codec.codes[byte]) {
+      substitutedBytes.add(byte);
+    }
+    codes.push(code);
     bitLength += code.length;
   }
 
-  const output = Buffer.alloc(prefixLength + Math.ceil(bitLength / 8));
+  // FifaLibrary always emits one final Huffman byte, including at an exact byte boundary.
+  const output = Buffer.alloc(prefixLength + Math.floor(bitLength / 8) + 1);
   if (longString) {
     output.writeUInt16BE(bytes.length, 0);
   } else {
     output.writeUInt8(bytes.length, 0);
   }
   let bitIndex = 0;
-  for (const byte of bytes) {
-    for (const bit of codec.codes[byte] as number[]) {
+  for (const code of codes) {
+    for (const bit of code) {
       if (bit === 1) {
         output[prefixLength + (bitIndex >> 3)] |= 1 << (7 - (bitIndex & 7));
       }
@@ -648,237 +463,174 @@ function encodeCompressedString(bytes: Buffer, longString: boolean, codec: Huffm
 }
 
 function writeCompressedStringOffset(record: Buffer, field: WritableField, offset: number, context: string): void {
-  if (offset < 0 || offset > 0xffffffff) {
-    throw new Error(`${context}: compressed string offset is outside the 32-bit range.`);
+  const byteOffset = field.bitOffset >> 3;
+  if (byteOffset + 4 > record.length) {
+    throw new Error(`${context}: compressed string offset is outside the record buffer.`);
   }
-  writeUnsignedBitsLE(record, field.bitOffset, 32, BigInt(offset), context);
+  record.writeInt32LE(offset, byteOffset);
 }
 
-function buildCompressedTableBuffer(dbBuffer: Buffer, layout: TableWriteLayout, table: DataTable, warnings: string[]): Buffer {
+function updateTableCrcs(tableBuffer: Buffer, recordsCrcOffset: number): void {
+  if (tableBuffer.length < tableHeaderSize || recordsCrcOffset + 4 > tableBuffer.length) {
+    throw new Error("Cannot update CRCs for a truncated table.");
+  }
+  tableBuffer.writeUInt32LE(computeDbCrc(tableBuffer.subarray(0, 32)), 32);
+  tableBuffer.writeUInt32LE(computeDbCrc(tableBuffer.subarray(tableHeaderSize, recordsCrcOffset)), recordsCrcOffset);
+}
+
+function normalizeUnchangedTable(dbBuffer: Buffer, layout: TableWriteLayout): Buffer {
+  const localRecordsCrcOffset = layout.recordsCrcOffset - layout.tableStart;
+  const outputLength = localRecordsCrcOffset + 4;
+  const output = Buffer.from(dbBuffer.subarray(layout.tableStart, layout.tableStart + outputLength));
+  if (layout.recordsCount === 0 && layout.hasCompressedStrings) {
+    output.writeUInt32LE(noCompressedStringBlockLength, layout.compressedStringLengthOffset - layout.tableStart);
+  }
+  updateTableCrcs(output, localRecordsCrcOffset);
+  return output;
+}
+
+function buildChangedTable(dbBuffer: Buffer, layout: TableWriteLayout, table: DataTable, warnings: string[]): Buffer {
   if (table.rows.length > 0xffff) {
     throw new Error(`${layout.name}: DB table row count exceeds the 16-bit record counter.`);
   }
 
   const header = Buffer.from(dbBuffer.subarray(layout.tableStart, layout.recordsOffset));
-  header.writeUInt32LE(0, layout.compressedStringLengthOffset - layout.tableStart);
   header.writeUInt16LE(table.rows.length, layout.recordsCountOffset - layout.tableStart);
   header.writeUInt16LE(table.rows.length, layout.validRecordsCountOffset - layout.tableStart);
-
-  const stringBytes = table.rows.map((row, rowIndex) => layout.fields.map((field, columnIndex) => {
-    if (!isCompressedStringField(field)) {
-      return undefined;
-    }
-    const context = `${layout.name} row ${rowIndex + 1}, ${field.name}`;
-    return compressedStringBytes(row[columnIndex] ?? "", field.dbFieldType === 14, context);
-  }));
-  const flattenedStringBytes = stringBytes.flat().filter((value): value is Buffer => Boolean(value));
-  const existingCodec = readExistingHuffmanCodec(dbBuffer, layout);
-  const extendedCodec = existingCodec ? extendHuffmanCodec(existingCodec, flattenedStringBytes) : undefined;
-  const codec = extendedCodec ?? buildHuffmanCodec(flattenedStringBytes);
-  if (existingCodec && extendedCodec && extendedCodec !== existingCodec) {
-    warnings.push(`${layout.name}: extended Huffman tree for new characters.`);
-  } else if (existingCodec && !extendedCodec) {
-    warnings.push(`${layout.name}: rebuilt Huffman tree because the original tree could not be extended.`);
-  }
-
   const records: Buffer[] = [];
-  const compressedParts: Buffer[] = [codec.tree];
-  let compressedLength = codec.tree.length;
+  const compressedParts: Buffer[] = [];
+  const substitutedBytes = new Set<number>();
+  let compressedLength = 0;
+  let codec: HuffmanCodec | undefined;
+
+  if (layout.hasCompressedStrings && table.rows.length > 0) {
+    codec = readExistingHuffmanCodec(dbBuffer, layout);
+    if (!codec) {
+      throw new Error(`${layout.name}: the original Huffman tree could not be read.`);
+    }
+    compressedParts.push(codec.tree);
+    compressedLength = codec.tree.length;
+  }
 
   for (let rowIndex = 0; rowIndex < table.rows.length; rowIndex += 1) {
     const record = Buffer.alloc(layout.recordSize);
     const row = table.rows[rowIndex];
     for (let columnIndex = 0; columnIndex < layout.fields.length; columnIndex += 1) {
       const field = layout.fields[columnIndex];
-      const context = `${layout.name} row ${rowIndex + 1}, ${field.name}`;
       const value = row[columnIndex] ?? "";
-      if (isCompressedStringField(field)) {
-        const offset = compressedLength;
-        const encoded = encodeCompressedString(
-          stringBytes[rowIndex][columnIndex] as Buffer,
-          field.dbFieldType === 14,
-          codec,
-          context
-        );
-        compressedParts.push(encoded);
-        compressedLength += encoded.length;
-        writeCompressedStringOffset(record, field, offset, context);
-      } else {
+      const context = `${layout.name} row ${rowIndex + 1}, ${field.name}`;
+      if (!isCompressedStringField(field)) {
         writeDbField(record, field, value, context);
+        continue;
       }
+      if (value.length === 0) {
+        writeCompressedStringOffset(record, field, emptyCompressedStringOffset, context);
+        continue;
+      }
+      if (!codec) {
+        throw new Error(`${layout.name}: compressed strings cannot be written without a Huffman tree.`);
+      }
+      const bytes = compressedStringBytes(value, field.dbFieldType === 14, context);
+      writeCompressedStringOffset(record, field, compressedLength, context);
+      const encoded = encodeCompressedString(bytes, field.dbFieldType === 14, codec, context, substitutedBytes);
+      compressedParts.push(encoded);
+      compressedLength += encoded.length;
     }
     records.push(record);
   }
 
-  if (compressedLength > 0xffffffff) {
-    throw new Error(`${layout.name}: compressed string block is outside the 32-bit range.`);
+  const storedCompressedLength = layout.hasCompressedStrings
+    ? table.rows.length === 0 ? noCompressedStringBlockLength : compressedLength
+    : 0;
+  header.writeUInt32LE(storedCompressedLength, layout.compressedStringLengthOffset - layout.tableStart);
+  header.writeUInt32LE(computeDbCrc(header.subarray(0, 32)), 32);
+
+  const paddingLength = compressedLength > 0 ? roundUp(compressedLength, 8) - compressedLength : 0;
+  const body = Buffer.concat([
+    header.subarray(tableHeaderSize),
+    ...records,
+    ...compressedParts,
+    Buffer.alloc(paddingLength)
+  ]);
+  const recordsCrc = Buffer.alloc(4);
+  recordsCrc.writeUInt32LE(computeDbCrc(body), 0);
+  if (substitutedBytes.size > 0) {
+    warnings.push(`${layout.name}: ${substitutedBytes.size} UTF-8 byte value(s) absent from the original Huffman tree were saved as spaces, matching DB Master.`);
   }
-  header.writeUInt32LE(compressedLength > 0 ? compressedLength : noCompressedStringBlockLength, layout.compressedStringLengthOffset - layout.tableStart);
-
-  return Buffer.concat([header, ...records, ...compressedParts]);
+  return Buffer.concat([header, ...records, ...compressedParts, Buffer.alloc(paddingLength), recordsCrc]);
 }
 
-function sumShiftBefore(expansions: Array<{ insertOffset: number; extraBytes: number }>, offset: number): number {
-  return expansions
-    .filter((expansion) => expansion.insertOffset < offset)
-    .reduce((total, expansion) => total + expansion.extraBytes, 0);
-}
-
-function sumReplacementShiftBefore(replacements: Array<{ tableStart: number; delta: number }>, tableStart: number): number {
-  return replacements
-    .filter((replacement) => replacement.tableStart < tableStart)
-    .reduce((total, replacement) => total + replacement.delta, 0);
-}
-
-function expandDatabaseForChangedRows(
-  dbBuffer: Buffer,
+function serializeDatabase(
+  original: Buffer,
   parsed: WritableLayoutParse,
-  tablesByName: Map<string, DataTable>,
+  changedTables: DataTable[],
   warnings: string[]
 ): Buffer {
-  const expansions: Array<{ layout: TableWriteLayout; insertOffset: number; extraBytes: number; rowCount: number }> = [];
-
-  for (const layout of parsed.layouts) {
-    const table = tablesByName.get(layout.name);
-    if (!table || table.rows.length <= layout.capacity) {
-      continue;
-    }
-    if (table.rows.length > 0xffff) {
-      throw new Error(`${layout.name}: DB table row count exceeds the 16-bit record counter.`);
-    }
-    if (layout.hasCompressedStrings) {
-      continue;
-    }
-    const missingRows = table.rows.length - layout.capacity;
-    expansions.push({
-      layout,
-      insertOffset: layout.recordsOffset + layout.recordsCount * layout.recordSize,
-      extraBytes: missingRows * layout.recordSize,
-      rowCount: table.rows.length
-    });
-  }
-
-  if (expansions.length === 0) {
-    return dbBuffer;
-  }
-
-  expansions.sort((left, right) => left.insertOffset - right.insertOffset);
-  let output = Buffer.from(dbBuffer);
-  let totalInserted = 0;
-  for (const expansion of expansions) {
-    const adjustedInsertOffset = expansion.insertOffset + totalInserted;
-    output = Buffer.concat([
-      output.subarray(0, adjustedInsertOffset),
-      Buffer.alloc(expansion.extraBytes),
-      output.subarray(adjustedInsertOffset)
-    ]);
-    totalInserted += expansion.extraBytes;
-    warnings.push(`${expansion.layout.name}: expanded DB allocation by ${expansion.extraBytes} bytes for ${expansion.rowCount} rows.`);
-  }
-
-  output.writeUInt32LE(parsed.dbSize + totalInserted, parsed.databaseStart + databaseHeader.length);
+  const changedByName = new Map(changedTables.map((table) => [table.name, table]));
+  const writtenNames = new Set<string>();
+  const tableBuffers: Buffer[] = [];
 
   for (const tableRef of parsed.tableRefs) {
-    const shift = sumShiftBefore(expansions, tableRef.tableStart);
-    if (shift > 0) {
-      output.writeUInt32LE(tableRef.offset + shift, tableRef.offsetPosition);
-    }
-  }
-
-  for (const expansion of expansions) {
-    const shiftedRecordsCountOffset = expansion.layout.recordsCountOffset + sumShiftBefore(expansions, expansion.layout.tableStart);
-    const shiftedValidRecordsCountOffset = expansion.layout.validRecordsCountOffset + sumShiftBefore(expansions, expansion.layout.tableStart);
-    output.writeUInt16LE(expansion.rowCount, shiftedRecordsCountOffset);
-    output.writeUInt16LE(expansion.rowCount, shiftedValidRecordsCountOffset);
-  }
-
-  return output;
-}
-
-function rebuildCompressedChangedTables(
-  dbBuffer: Buffer,
-  parsed: WritableLayoutParse,
-  tablesByName: Map<string, DataTable>,
-  warnings: string[]
-): { output: Buffer; tableNames: Set<string> } {
-  const compressedLayouts = parsed.layouts
-    .filter((layout) => layout.hasCompressedStrings && tablesByName.has(layout.name))
-    .sort((left, right) => left.tableStart - right.tableStart);
-
-  if (compressedLayouts.length === 0) {
-    return { output: dbBuffer, tableNames: new Set<string>() };
-  }
-
-  let output = Buffer.from(dbBuffer);
-  const replacements: Array<{ tableStart: number; delta: number }> = [];
-  const tableNames = new Set<string>();
-
-  for (const layout of compressedLayouts) {
-    const table = tablesByName.get(layout.name);
-    if (!table) {
+    const layout = tableRef.layout;
+    if (!layout) {
+      const nextStart = parsed.tableRefs
+        .map((candidate) => candidate.tableStart)
+        .filter((start) => start > tableRef.tableStart)
+        .sort((left, right) => left - right)[0] ?? parsed.databaseEnd;
+      tableBuffers.push(Buffer.from(original.subarray(tableRef.tableStart, nextStart)));
       continue;
     }
-
-    const shift = sumReplacementShiftBefore(replacements, layout.tableStart);
-    const shiftedLayout: TableWriteLayout = {
-      ...layout,
-      tableStart: layout.tableStart + shift,
-      tableEnd: layout.tableEnd + shift,
-      recordsCountOffset: layout.recordsCountOffset + shift,
-      validRecordsCountOffset: layout.validRecordsCountOffset + shift,
-      compressedStringLengthOffset: layout.compressedStringLengthOffset + shift,
-      recordsOffset: layout.recordsOffset + shift
-    };
-    const replacement = buildCompressedTableBuffer(output, shiftedLayout, table, warnings);
-    const oldLength = shiftedLayout.tableEnd - shiftedLayout.tableStart;
-    const delta = replacement.length - oldLength;
-    output = Buffer.concat([
-      output.subarray(0, shiftedLayout.tableStart),
-      replacement,
-      output.subarray(shiftedLayout.tableEnd)
-    ]);
-    replacements.push({ tableStart: layout.tableStart, delta });
-    tableNames.add(layout.name);
-    warnings.push(`${layout.name}: updated compressed string block (${delta >= 0 ? "+" : ""}${delta} bytes).`);
-  }
-
-  const totalDelta = replacements.reduce((total, replacement) => total + replacement.delta, 0);
-  output.writeUInt32LE(parsed.dbSize + totalDelta, parsed.databaseStart + databaseHeader.length);
-
-  for (const tableRef of parsed.tableRefs) {
-    const shift = sumReplacementShiftBefore(replacements, tableRef.tableStart);
-    if (shift !== 0) {
-      output.writeUInt32LE(tableRef.offset + shift, tableRef.offsetPosition);
+    const changedTable = changedByName.get(layout.name);
+    if (changedTable) {
+      tableBuffers.push(buildChangedTable(original, layout, changedTable, warnings));
+      writtenNames.add(layout.name);
+    } else {
+      tableBuffers.push(normalizeUnchangedTable(original, layout));
     }
   }
 
-  return { output, tableNames };
-}
-
-function deduplicateTableRowsInPlace(table: DataTable): void {
-  if (!table.name.toLowerCase().startsWith("languagestrings")) {
-    return;
-  }
-  const stringIdColumn = table.columns.findIndex((c) => c.toLowerCase() === "stringid");
-  if (stringIdColumn < 0) {
-    return;
+  const missing = [...changedByName.keys()].filter((name) => !writtenNames.has(name));
+  if (missing.length > 0) {
+    throw new Error(`Changed DB table layout was not found: ${missing.join(", ")}.`);
   }
 
-  const seen = new Map<string, string[]>();
-  for (const row of table.rows) {
-    const key = (row[stringIdColumn] ?? "").toLowerCase();
-    seen.set(key, row);
+  const headerAndDirectory = Buffer.from(original.subarray(parsed.databaseStart, parsed.tablesStartOffset));
+  let databaseSize = headerAndDirectory.length;
+  for (const tableBuffer of tableBuffers) {
+    databaseSize += tableBuffer.length;
+  }
+  if (databaseSize > 0xffffffff) {
+    throw new Error("Serialized database exceeds the 32-bit size limit.");
+  }
+  headerAndDirectory.writeUInt32LE(databaseSize, 8);
+
+  const tablesStartRelative = parsed.tablesStartOffset - parsed.databaseStart;
+  let tableOffset = 0;
+  for (let index = 0; index < parsed.tableRefs.length; index += 1) {
+    const offsetPosition = parsed.tableRefs[index].offsetPosition - parsed.databaseStart;
+    headerAndDirectory.writeUInt32LE(tableOffset, offsetPosition);
+    tableOffset += tableBuffers[index].length;
   }
 
-  table.rows = [...seen.values()];
-  const hashIdColumn = table.columns.findIndex((c) => c.toLowerCase() === "hashid");
-  if (hashIdColumn >= 0) {
-    table.rows.sort((a, b) => {
-      const hashA = Number(a[hashIdColumn]) || 0;
-      const hashB = Number(b[hashIdColumn]) || 0;
-      return hashA - hashB;
-    });
+  headerAndDirectory.writeUInt32LE(computeDbCrc(headerAndDirectory.subarray(0, 20)), 20);
+  const directoryCrcRelative = parsed.directoryCrcOffset - parsed.databaseStart;
+  headerAndDirectory.writeUInt32LE(
+    computeDbCrc(headerAndDirectory.subarray(24, directoryCrcRelative)),
+    directoryCrcRelative
+  );
+  if (headerAndDirectory.length !== tablesStartRelative) {
+    throw new Error("Database table directory length changed unexpectedly.");
   }
+
+  const database = Buffer.concat([headerAndDirectory, ...tableBuffers]);
+  if (database.length !== databaseSize) {
+    throw new Error("Serialized database size does not match its header.");
+  }
+  return Buffer.concat([
+    original.subarray(0, parsed.databaseStart),
+    database,
+    original.subarray(parsed.databaseEnd)
+  ]);
 }
 
 type WritableDatabaseProject = DbProject | LocalizationProject;
@@ -888,93 +640,27 @@ function saveSingleDatabaseProject(project: WritableDatabaseProject): SaveDataba
     throw new Error("Open a DB/XML pair before saving a .db file.");
   }
 
-  for (const table of project.tables) {
-    deduplicateTableRowsInPlace(table);
-  }
-
   const original = readFileSync(project.dbPath);
-  let output: Buffer = Buffer.from(original);
-  let parsed = parseWritableLayouts(output, project.descriptors);
+  const parsed = parseWritableLayouts(original, project.descriptors);
   const warnings = [...parsed.warnings];
   const changedTables = project.tables.filter((table) => table.changed);
-  const tablesByName = new Map<string, DataTable>(changedTables.map((table) => [table.name, table]));
-  let tablesWritten = 0;
-
   if (changedTables.length === 0) {
     return {
       filePath: project.dbPath,
       warnings,
-      tablesWritten
+      tablesWritten: 0
     };
   }
 
-  const expandedOutput = expandDatabaseForChangedRows(output, parsed, tablesByName, warnings);
-  if (expandedOutput.length !== output.length) {
-    output = expandedOutput;
-    parsed = parseWritableLayouts(output, project.descriptors);
-    warnings.push(...parsed.warnings);
-  }
-
-  const compressedRewrite = rebuildCompressedChangedTables(output, parsed, tablesByName, warnings);
-  const rewrittenCompressedTableNames = compressedRewrite.tableNames;
-  if (rewrittenCompressedTableNames.size > 0) {
-    output = compressedRewrite.output;
-    tablesWritten += rewrittenCompressedTableNames.size;
-    parsed = parseWritableLayouts(output, project.descriptors);
-    warnings.push(...parsed.warnings);
-  }
-
-  for (const layout of parsed.layouts) {
-    const table = tablesByName.get(layout.name);
-    if (!table || rewrittenCompressedTableNames.has(layout.name)) {
-      continue;
-    }
-    if (table.rows.length > layout.capacity) {
-      throw new Error(`${layout.name}: ${table.rows.length} rows do not fit in the original DB allocation (${layout.capacity}).`);
-    }
-    if (table.rows.length > 0xffff) {
-      throw new Error(`${layout.name}: DB table row count exceeds the 16-bit record counter.`);
-    }
-
-    const writableFields = layout.fields.map((field) => fieldFitsRecord(field, layout.recordSize));
-    writableFields.forEach((writable, columnIndex) => {
-      if (!writable) {
-        const field = layout.fields[columnIndex];
-        warnings.push(`${layout.name}.${field.name}: field is outside the record buffer and was left unchanged.`);
-      }
-    });
-
-    output.writeUInt16LE(table.rows.length, layout.recordsCountOffset);
-    output.writeUInt16LE(table.rows.length, layout.validRecordsCountOffset);
-    for (let rowIndex = 0; rowIndex < table.rows.length; rowIndex += 1) {
-      const recordOffset = layout.recordsOffset + rowIndex * layout.recordSize;
-      const record = output.subarray(recordOffset, recordOffset + layout.recordSize);
-      const row = table.rows[rowIndex];
-      for (let columnIndex = 0; columnIndex < layout.fields.length; columnIndex += 1) {
-        if (!writableFields[columnIndex]) {
-          continue;
-        }
-        const field = layout.fields[columnIndex];
-        const context = `${layout.name} row ${rowIndex + 1}, ${field.name}`;
-        writeDbField(record, field, row[columnIndex] ?? "", context);
-      }
-    }
-    tablesWritten += 1;
-  }
-
-  if (tablesWritten === 0) {
-    throw new Error("No changed DB tables were writable.");
-  }
-
+  const output = serializeDatabase(original, parsed, changedTables, warnings);
   const backupPath = `${project.dbPath}.bak`;
   copyFileSync(project.dbPath, backupPath);
   writeFileSync(project.dbPath, output);
-
   return {
     filePath: project.dbPath,
     backupPath,
     warnings,
-    tablesWritten
+    tablesWritten: changedTables.length
   };
 }
 
