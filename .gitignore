@@ -9,3 +9,5 @@ DbMaster.Properties/
 Properties/
 app.manifest
 references/
+obj/
+origin/
