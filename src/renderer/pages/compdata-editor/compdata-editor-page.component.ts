@@ -1,53 +1,56 @@
 import { CommonModule } from "@angular/common";
-import { ChangeDetectorRef, Component, EventEmitter, Output } from "@angular/core";
+import { ChangeDetectorRef, Component, EventEmitter, Output, ViewEncapsulation } from "@angular/core";
 import { FormsModule } from "@angular/forms";
-import type {
-  CompdataCompetitionSummary,
-  CompdataOpenProgress,
-  CompdataProject,
-  CompdataScheduleEntry,
-  CompdataStandingSlot,
-  CompdataTask,
-  CompdataObject,
-  CompdataSetting,
-  CompdataAdvancement,
-  CompdataInitTeam,
-  DbProject
-} from "../../../shared/types";
-
+import type { CompdataCompetitionSummary, CompdataObject, CompdataOpenProgress, CompdataProject, DbProject } from "../../../shared/types";
 import type { DbMasterApi } from "../../services/dbmaster-api";
-import { LeagueEditorService } from "../../services/league-editor.service";
-import { TeamEditorService } from "../../services/team-editor.service";
-import { LocalizationService } from "../../services/localization.service";
-import { ToastService } from "../../services/toast.service";
 import { LoadingService } from "../../services/loading.service";
+import { ToastService } from "../../services/toast.service";
+import { CompObjAdvancedViewComponent } from "./compobj-advanced-view.component";
+import { CompObjDisplayService, PHASE_OPTIONS } from "../../services/compdata/compobj-display.service";
+import { CompObjTreeService } from "../../services/compdata/compobj-tree.service";
+import { CompObjValidationIssue, CompObjValidationService } from "../../services/compdata/compobj-validation.service";
+import { CreateTournamentRequest, CreateTournamentWizardComponent } from "./create-tournament-wizard.component";
+import { TournamentOverviewComponent } from "./tournament-overview.component";
+import { TournamentPhaseDetailsComponent } from "./tournament-phase-details.component";
+import { TournamentSidebarComponent } from "./tournament-sidebar.component";
+import { TournamentTeamsSetupComponent } from "./tournament-teams-setup.component";
+import { TournamentTeamSourcesComponent } from "./tournament-team-sources.component";
+import { TournamentRulesSettingsComponent } from "./tournament-rules-settings.component";
+import { TournamentAdvancementComponent } from "./tournament-advancement.component";
+import { TournamentCalendarComponent } from "./tournament-calendar.component";
+import { ContinentalQualificationComponent } from "./continental-qualification.component";
+import { CountryWeatherComponent } from "./country-weather.component";
+import { ScheduleDateService } from "../../services/compdata/schedule-date.service";
+import { ScheduleService } from "../../services/compdata/schedule.service";
+import { WeatherService } from "../../services/compdata/weather.service";
+import { SettingsService } from "../../services/compdata/settings.service";
+import { nations } from "../../../utils/get-nations/get-nations";
 
-import { InputCheckboxComponent } from "../../components/input-checkbox/input-checkbox.component";
-import { SearchListComponent } from "../../components/search-list/search-list.component";
-
-export interface CompdataReferenceLeague {
-  leagueId: string;
-  displayName: string;
-  countryName: string;
-  teamsCount: number;
-  alreadyInCompdata: boolean;
-}
-
-const debugCompdataRenderer = (stage: string, detail?: unknown): void => {
-  const timestamp = new Date().toISOString();
-  if (detail === undefined) {
-    console.log(`[compdata/renderer ${timestamp}] ${stage}`);
-    return;
-  }
-  console.log(`[compdata/renderer ${timestamp}] ${stage}`, detail);
-};
+type EditorDialog = "create" | "addPhase" | "addChild" | "editTournament" | "editPhase" | "editPhaseQuantities" | "editChild" | "delete" | "validation" | "preview" | undefined;
+type DeleteTarget = { kind: "tournament" | "phase" | "child"; object: CompdataObject };
 
 @Component({
   selector: "app-compdata-editor-page",
   standalone: true,
-  imports: [CommonModule, FormsModule, InputCheckboxComponent, SearchListComponent],
+  imports: [
+    CommonModule,
+    FormsModule,
+    TournamentSidebarComponent,
+    TournamentOverviewComponent,
+    TournamentPhaseDetailsComponent,
+    TournamentTeamsSetupComponent,
+    TournamentTeamSourcesComponent,
+    TournamentRulesSettingsComponent,
+    ContinentalQualificationComponent,
+    TournamentAdvancementComponent,
+    TournamentCalendarComponent,
+    CountryWeatherComponent,
+    CompObjAdvancedViewComponent,
+    CreateTournamentWizardComponent
+  ],
   templateUrl: "./compdata-editor-page.component.html",
-  styleUrl: "./compdata-editor-page.component.scss"
+  styleUrl: "./compdata-editor-page.component.scss",
+  encapsulation: ViewEncapsulation.None
 })
 export class CompdataEditorPageComponent {
   @Output() showHome = new EventEmitter<void>();
@@ -55,1024 +58,686 @@ export class CompdataEditorPageComponent {
 
   compdataProject?: CompdataProject;
   compdataReferenceProject?: DbProject;
-  selectedCompdataCompetitionId = 0;
-  compdataCompetitionFilter = "";
   compdataDirty = false;
+  view: "simple" | "advanced" = "simple";
+  activeTab: "structure" | "teams" | "sources" | "rules" | "continental" | "advancement" | "calendar" | "weather" = "structure";
+  selectedTournamentId = 0;
+  selectedPhaseId = 0;
+  dialog: EditorDialog;
+  deleteTarget?: DeleteTarget;
 
-  markDirty(): void {
-    this.compdataDirty = true;
-  }
+  readonly phaseOptions = PHASE_OPTIONS;
+  phaseDraft = { key: "FCE_League_Stage", customKey: "", code: "S1", childCount: 1, teamsPerChild: 20 };
+  phaseQuantitiesDraft = { groups: 1, teams: 20 };
+  tournamentDraft = { nameKey: "", code: "", parentId: 0 };
+  childDraft = { code: "G1", description: "", teams: 20 };
 
-  activeTab: "summary" | "participants" | "stages" | "matches" | "advancements" | "builder" = "summary";
-
-  compdataBuilder = {
-    sourceLeagueId: "",
-    name: "",
-    format: "league",
-    competitionType: "LEAGUE",
-    assetId: "",
-    parentId: "",
-    groups: "4",
-    teamsPerGroup: "4",
-    qualifiersPerGroup: "2",
-    rounds: "2",
-    seasonStartMonth: "8",
-    seasonStartYear: "2026",
-    yearOffset: "1",
-    startDay: "30",
-    dayStep: "7",
-    time: "20:00"
-  };
-
-  openingCompdataFolderPath?: string;
-  private queuedCompdataLocalizationFolderPath?: string;
   private readonly api: DbMasterApi = window.dbmaster;
+  private originalObjectIds = new Set<number>();
+  private removedOriginalLines: string[] = [];
+  private editingObjectId = 0;
 
   constructor(
     private readonly changeDetector: ChangeDetectorRef,
-    private readonly leagueEditor: LeagueEditorService,
-    private readonly teamEditor: TeamEditorService,
-    private readonly localization: LocalizationService,
-    private readonly toastService: ToastService,
-    private readonly loadingService: LoadingService
-  ) { }
+    public readonly display: CompObjDisplayService,
+    public readonly tree: CompObjTreeService,
+    private readonly validation: CompObjValidationService,
+    private readonly schedule: ScheduleService,
+    private readonly scheduleDates: ScheduleDateService,
+    private readonly weather: WeatherService,
+    private readonly settings: SettingsService,
+    private readonly toast: ToastService,
+    private readonly loading: LoadingService
+  ) {}
 
-  get selectedCompdataCompetition(): CompdataCompetitionSummary | undefined {
-    return this.compdataProject?.competitions.find((competition) => competition.id === this.selectedCompdataCompetitionId);
+  get selectedCompetition(): CompdataCompetitionSummary | undefined {
+    return this.compdataProject?.competitions.find((competition) => competition.id === this.selectedTournamentId);
   }
 
-  get selectedCompdataObject(): CompdataObject | undefined {
-    const selected = this.selectedCompdataCompetition;
-    return selected ? this.compdataProject?.objects.find((object) => object.id === selected.id) : undefined;
+  get selectedTournamentObject(): CompdataObject | undefined {
+    const object = this.display.object(this.compdataProject, this.selectedTournamentId);
+    return object?.kind === 3 ? object : undefined;
   }
 
-  setTab(tab: typeof this.activeTab): void {
-    this.activeTab = tab;
+  get selectedPhase(): CompdataObject | undefined {
+    if (this.selectedPhaseId <= 0) return undefined;
+    const object = this.display.object(this.compdataProject, this.selectedPhaseId);
+    return object?.kind === 4 && object.parentId === this.selectedTournamentId ? object : undefined;
   }
 
-  private _cachedFilteredCompetitions: CompdataCompetitionSummary[] = [];
-  private _lastFilterString = "";
-  private _lastProjectForFilteredCompetitions?: CompdataProject;
+  get locationOptions(): CompdataObject[] {
+    const compOptions = this.compdataProject?.objects.filter((object) => object.kind === 0 || object.kind === 1) ?? [];
+    const nationOptions: CompdataObject[] = nations.map((n) => ({ id: n.id, kind: 2, shortName: n.name, description: n.name, parentId: 0 }));
+    return [...compOptions, ...nationOptions];
+  }
 
-  get filteredCompdataCompetitions(): CompdataCompetitionSummary[] {
-    const filter = this.compdataCompetitionFilter.trim().toLowerCase();
-    if (
-      this.compdataProject === this._lastProjectForFilteredCompetitions &&
-      filter === this._lastFilterString &&
-      this._cachedFilteredCompetitions.length > 0 // basic sanity check
-    ) {
-      return this._cachedFilteredCompetitions;
-    }
+  get effectivePhaseKey(): string {
+    return this.phaseDraft.key === "custom" ? this.phaseDraft.customKey.trim() : this.phaseDraft.key;
+  }
 
-    this._cachedFilteredCompetitions = (this.compdataProject?.competitions ?? []).filter((competition) => {
-      if (!filter) {
-        return true;
+  get phaseDraftInfo() {
+    return this.display.phaseInfo(this.effectivePhaseKey);
+  }
+
+  get phaseDraftChildNoun(): string {
+    return this.display.childNoun({ id: 0, kind: 4, shortName: "", description: this.effectivePhaseKey, parentId: 0 }, 2);
+  }
+
+  get validationIssues(): CompObjValidationIssue[] {
+    if (!this.compdataProject || !this.selectedCompetition) return [];
+    return this.validation.validateTournament(this.compdataProject, this.selectedCompetition, this.compdataReferenceProject);
+  }
+
+  get validationHeading(): string {
+    if (!this.validationIssues.length) return "Structure looks valid";
+    return this.validationIssues.some((issue) => issue.severity === "error") ? "Structure has errors" : "Structure has warnings";
+  }
+
+  get previewObjects(): CompdataObject[] {
+    if (!this.compdataProject || !this.selectedTournamentId) return [];
+    return this.tree.tournamentObjects(this.compdataProject, this.selectedTournamentId);
+  }
+
+  get previewAdded(): number { return this.previewObjects.filter((object) => !this.originalObjectIds.has(object.id)).length; }
+  get previewEdited(): number { return this.previewObjects.filter((object) => this.originalObjectIds.has(object.id) && object.originalRawLine && object.originalRawLine !== this.display.rawLine(object)).length; }
+  get previewRemoved(): number { return this.removedOriginalLines.length; }
+
+  get generatedStandingsLines(): string[] {
+    if (!this.compdataProject || !this.selectedTournamentId) return [];
+    const groupIds = new Set(this.previewObjects.filter(o => o.kind === 5).map(o => o.id));
+    return this.compdataProject.standings
+      .filter(s => groupIds.has(s.groupId))
+      .sort((a, b) => a.groupId !== b.groupId ? a.groupId - b.groupId : a.position - b.position)
+      .map(s => `${s.groupId},${s.position}`);
+  }
+
+  selectTournament(id: number): void {
+    this.selectedTournamentId = id;
+    this.selectedPhaseId = 0;
+    this.activeTab = "structure";
+  }
+
+  openPhase(id: number): void {
+    const phase = this.display.object(this.compdataProject, id);
+    this.selectedPhaseId = phase?.kind === 4 && phase.parentId === this.selectedTournamentId ? id : 0;
+  }
+
+  openCreateWizard(): void { this.dialog = "create"; }
+
+  openGlobalWeather(): void {
+    this.selectedPhaseId = 0;
+    this.activeTab = "weather";
+  }
+
+  createTournament(request: CreateTournamentRequest): void {
+    if (!this.compdataProject) return;
+    
+    let resolvedParentId = request.locationId;
+    let newCountryCreated = false;
+    let maxId = this.nextObjectId() - 1;
+
+    if (request.locationType === 2) {
+      const targetDesc = `NationName_${request.locationId}`.toLowerCase();
+      const existingCountry = this.compdataProject.objects.find(obj => obj.kind === 2 && obj.description.toLowerCase() === targetDesc);
+      
+      if (existingCountry) {
+        resolvedParentId = existingCountry.id;
+      } else {
+        const nation = nations.find(n => n.id === request.locationId);
+        if (!nation) {
+          this.toast.show("DBM Studio could not create the country entry in compobj.", "error");
+          return;
+        }
+        
+        const shortCode = nation.name.substring(0, 4).toUpperCase();
+        maxId++;
+        const newCountryId = maxId;
+        // Since we don't have confederation data in nations constant, we use fallback 0 (World)
+        this.compdataProject.objects.push({ id: newCountryId, kind: 2, shortName: shortCode, description: `NationName_${nation.id}`, parentId: 0 });
+        resolvedParentId = newCountryId;
+        newCountryCreated = true;
       }
-      return [
-        competition.shortName,
-        competition.description,
-        this.resolveCompdataText(competition.description),
-        String(competition.id)
-      ].some((value) => value.toLowerCase().includes(filter));
-    });
-
-    this._lastFilterString = filter;
-    this._lastProjectForFilteredCompetitions = this.compdataProject;
-    return this._cachedFilteredCompetitions;
-  }
-
-  get compdataReferenceLabel(): string {
-    if (!this.compdataReferenceProject) {
-      return "No LOC reference loaded";
-    }
-    return this.compdataReferenceProject.localization?.title ?? this.compdataReferenceProject.title;
-  }
-
-  private _cachedLeagueOptions: CompdataReferenceLeague[] = [];
-  private _lastReferenceProjectForLeagues?: DbProject;
-
-  get compdataLeagueOptions(): CompdataReferenceLeague[] {
-    if (!this.compdataReferenceProject) {
-      return [];
-    }
-    if (this.compdataReferenceProject === this._lastReferenceProjectForLeagues) {
-      return this._cachedLeagueOptions;
-    }
-    const existingAssetIds = new Set(
-      this.compdataProject?.settings
-        .filter((setting) => setting.key === "asset_id")
-        .map((setting) => setting.value) ?? []
-    );
-    this._cachedLeagueOptions = this.leagueEditor.findLeagues(this.compdataReferenceProject, "", "", 10000).map((league) => ({
-      leagueId: league.leagueId,
-      displayName: league.displayName,
-      countryName: league.countryName,
-      teamsCount: league.teamsCount,
-      alreadyInCompdata: existingAssetIds.has(league.leagueId)
-    }));
-    this._lastReferenceProjectForLeagues = this.compdataReferenceProject;
-    return this._cachedLeagueOptions;
-  }
-
-  get compdataReferenceTeamsCount(): number {
-    return this.teamEditor.findTeamsTable(this.compdataReferenceProject)?.rows.length ?? 0;
-  }
-
-  get selectedBuilderLeague(): CompdataReferenceLeague | undefined {
-    return this.compdataLeagueOptions.find((league) => league.leagueId === this.compdataBuilder.sourceLeagueId);
-  }
-
-  private _cachedParentOptions: Array<{ value: string; label: string }> = [];
-  private _lastProjectForParentOptions?: CompdataProject;
-
-  get compdataParentOptions() {
-    if (!this.compdataProject) {
-      return [];
-    }
-    if (this.compdataProject === this._lastProjectForParentOptions) {
-      return this._cachedParentOptions;
-    }
-    this._cachedParentOptions = this.compdataProject.objects
-      .filter((object) => object.kind <= 2)
-      .map((object) => ({
-        value: String(object.id),
-        label: `${object.shortName || object.id} / ${this.resolveCompdataText(object.description)}`
-      }));
-    this._lastProjectForParentOptions = this.compdataProject;
-    return this._cachedParentOptions;
-  }
-
-  private _cachedStageSettings: Array<{ stage: CompdataCompetitionSummary["stages"][number]; settings: string[]; groups: CompdataCompetitionSummary["groups"] }> = [];
-  private _lastCompetitionForStageSettings?: CompdataCompetitionSummary;
-
-  get compdataStageSettings(): Array<{ stage: CompdataCompetitionSummary["stages"][number]; settings: string[]; groups: CompdataCompetitionSummary["groups"] }> {
-    const competition = this.selectedCompdataCompetition;
-    if (!competition || !this.compdataProject) {
-      return [];
-    }
-    if (competition === this._lastCompetitionForStageSettings) {
-      return this._cachedStageSettings;
-    }
-    this._cachedStageSettings = competition.stages.map((stage) => ({
-      stage,
-      settings: this.compdataProject?.settings
-        .filter((setting) => setting.objectId === stage.id)
-        .map((setting) => `${setting.key}: ${setting.value}`) ?? [],
-      groups: competition.groups.filter((group) => group.parentId === stage.id)
-    }));
-    this._lastCompetitionForStageSettings = competition;
-    return this._cachedStageSettings;
-  }
-
-  private _cachedTeamOptions: Array<{ value: string; label: string }> = [];
-  private _lastReferenceProjectForTeams?: DbProject;
-
-  get compdataTeamOptions(): Array<{ value: string; label: string }> {
-    if (!this.compdataReferenceProject) {
-      return [];
-    }
-    if (this.compdataReferenceProject === this._lastReferenceProjectForTeams) {
-      return this._cachedTeamOptions;
-    }
-    const table = this.teamEditor.findTeamsTable(this.compdataReferenceProject);
-    if (!table) {
-      this._cachedTeamOptions = [];
     } else {
-      const teamIdIndex = table.fields.findIndex((f) => f.name === "teamid");
-      const teamNameIndex = table.fields.findIndex((f) => f.name === "teamname");
-      this._cachedTeamOptions = table.rows.map((row) => {
-        const teamId = row[teamIdIndex] ?? "";
-        const rawName = teamNameIndex >= 0 ? row[teamNameIndex]?.trim() : "";
-        const fallback = rawName || `Team ${teamId}`;
-        const locName = this.localization.resolveString(this.compdataReferenceProject!, `TeamName_${teamId}`, fallback);
-        return {
-          value: teamId,
-          label: `${locName} (${teamId})`
-        };
-      });
-    }
-    this._lastReferenceProjectForTeams = this.compdataReferenceProject;
-    return this._cachedTeamOptions;
-  }
-
-  get selectedCompetitionObjectIds(): Set<number> {
-    const comp = this.selectedCompdataCompetition;
-    if (!comp) return new Set();
-    const ids = new Set<number>();
-    ids.add(comp.id);
-    for (const stage of comp.stages) ids.add(stage.id);
-    for (const group of comp.groups) ids.add(group.id);
-    return ids;
-  }
-
-  get competitionSettings() {
-    const ids = this.selectedCompetitionObjectIds;
-    if (ids.size === 0) return [];
-    return this.compdataProject?.settings.filter(s => ids.has(s.objectId)) ?? [];
-  }
-
-  addSetting(): void {
-    if (!this.compdataProject || !this.selectedCompdataObject) return;
-    this.compdataProject.settings.push({
-      objectId: this.selectedCompdataObject.id,
-      key: "new_setting",
-      value: "0"
-    });
-    this.markDirty();
-  }
-
-  removeSetting(setting: CompdataSetting): void {
-    if (!this.compdataProject) return;
-    const index = this.compdataProject.settings.indexOf(setting);
-    if (index >= 0) {
-      this.compdataProject.settings.splice(index, 1);
-      this.markDirty();
-    }
-  }
-
-  updateSetting(key: string, value: string): void {
-    if (!this.compdataProject || !this.selectedCompdataObject) return;
-    const existing = this.competitionSettings.find(s => s.key === key);
-    if (existing) {
-      existing.value = value;
-    } else {
-      this.compdataProject.settings.push({
-        objectId: this.selectedCompdataObject.id,
-        key,
-        value
-      });
-    }
-    this.markDirty();
-  }
-
-  getSetting(key: string, fallback = ""): string {
-    return this.competitionSettings.find(s => s.key === key)?.value ?? fallback;
-  }
-
-  get competitionStandings() {
-    const ids = this.selectedCompetitionObjectIds;
-    if (ids.size === 0) return [];
-    return this.compdataProject?.standings.filter(s => ids.has(s.groupId)).sort((a, b) => a.position - b.position) ?? [];
-  }
-
-  addStanding(): void {
-    if (!this.compdataProject || !this.selectedCompdataObject) return;
-    const position = this.competitionStandings.length > 0 ? Math.max(...this.competitionStandings.map(s => s.position)) + 1 : 1;
-    this.compdataProject.standings.push({
-      groupId: this.selectedCompdataObject.id,
-      position
-    });
-    this.markDirty();
-  }
-
-  removeStanding(standing: CompdataStandingSlot): void {
-    if (!this.compdataProject) return;
-    const index = this.compdataProject.standings.indexOf(standing);
-    if (index >= 0) {
-      this.compdataProject.standings.splice(index, 1);
-      this.markDirty();
-    }
-  }
-
-  get competitionAdvancements() {
-    const ids = this.selectedCompetitionObjectIds;
-    if (ids.size === 0) return [];
-    return this.compdataProject?.advancements.filter(a => ids.has(a.fromGroupId)).sort((a, b) => a.fromPosition - b.fromPosition) ?? [];
-  }
-
-  addAdvancement(): void {
-    if (!this.compdataProject || !this.selectedCompdataObject) return;
-    this.compdataProject.advancements.push({
-      fromGroupId: this.selectedCompdataObject.id,
-      fromPosition: 1,
-      toGroupId: 0,
-      toPosition: 1
-    });
-    this.markDirty();
-  }
-
-  removeAdvancement(advancement: CompdataAdvancement): void {
-    if (!this.compdataProject) return;
-    const index = this.compdataProject.advancements.indexOf(advancement);
-    if (index >= 0) {
-      this.compdataProject.advancements.splice(index, 1);
-      this.markDirty();
-    }
-  }
-
-  get competitionSchedules() {
-    const ids = this.selectedCompetitionObjectIds;
-    if (ids.size === 0) return [];
-    return this.compdataProject?.schedules.filter(s => ids.has(s.objectId)).sort((a, b) => a.day - b.day || a.round - b.round) ?? [];
-  }
-
-  addScheduleEntry(): void {
-    if (!this.compdataProject || !this.selectedCompdataObject) return;
-    const round = this.competitionSchedules.length > 0 ? Math.max(...this.competitionSchedules.map(s => s.round)) + 1 : 1;
-    this.compdataProject.schedules.push({
-      objectId: this.selectedCompdataObject.id,
-      day: 30 + (round - 1) * 7,
-      round,
-      minGames: 1,
-      maxGames: 10,
-      time: "20:00"
-    });
-    this.markDirty();
-  }
-
-  removeScheduleEntry(schedule: CompdataScheduleEntry): void {
-    if (!this.compdataProject) return;
-    const index = this.compdataProject.schedules.indexOf(schedule);
-    if (index >= 0) {
-      this.compdataProject.schedules.splice(index, 1);
-      this.markDirty();
-    }
-  }
-
-  get competitionTasks() {
-    const id = this.selectedCompdataCompetitionId;
-    return this.compdataProject?.tasks.filter(t => t.competitionId === id) ?? [];
-  }
-
-  addTask(): void {
-    if (!this.compdataProject || !this.selectedCompdataCompetitionId) return;
-    this.compdataProject.tasks.push({
-      competitionId: this.selectedCompdataCompetitionId,
-      timing: "start",
-      action: "FillFromLeague",
-      targetId: this.selectedCompdataObject?.id ?? 0,
-      param1: "0",
-      param2: "0",
-      param3: "0"
-    });
-    this.markDirty();
-  }
-
-  removeTask(task: CompdataTask): void {
-    if (!this.compdataProject) return;
-    const index = this.compdataProject.tasks.indexOf(task);
-    if (index >= 0) {
-      this.compdataProject.tasks.splice(index, 1);
-      this.markDirty();
-    }
-  }
-
-  teamToAdd = "";
-
-  get competitionInitTeams() {
-    const id = this.selectedCompdataCompetitionId;
-    return this.compdataProject?.initTeams.filter(t => t.competitionId === id).sort((a, b) => a.position - b.position) ?? [];
-  }
-
-  addInitTeam(): void {
-    if (!this.compdataProject || !this.selectedCompdataCompetitionId || !this.teamToAdd) return;
-    const position = this.competitionInitTeams.length > 0 ? Math.max(...this.competitionInitTeams.map(t => t.position)) + 1 : 1;
-    this.compdataProject.initTeams.push({
-      competitionId: this.selectedCompdataCompetitionId,
-      position,
-      teamId: this.teamToAdd
-    });
-    this.teamToAdd = "";
-    this.markDirty();
-  }
-
-  removeInitTeam(team: CompdataInitTeam): void {
-    if (!this.compdataProject) return;
-    const index = this.compdataProject.initTeams.indexOf(team);
-    if (index >= 0) {
-      this.compdataProject.initTeams.splice(index, 1);
-      this.markDirty();
-    }
-  }
-
-  resolveTeamName(teamId: string): string {
-    if (!teamId) return "Vaga em aberto";
-    const opt = this.compdataTeamOptions.find(o => o.value === teamId);
-    if (opt) return opt.label;
-    if (this.compdataReferenceProject) {
-      const resolved = this.localization.resolveString(this.compdataReferenceProject, `TeamName_${teamId}`, "");
-      if (resolved) return `${resolved} (${teamId})`;
-    }
-    return `Team ${teamId}`;
-  }
-
-  resolveObjectName(objectId: number): string {
-    const obj = this.compdataProject?.objects.find(o => o.id === objectId);
-    if (!obj) return `ID ${objectId}`;
-    const desc = this.resolveCompdataText(obj.description);
-    return desc !== obj.description ? `${obj.shortName} — ${desc}` : obj.shortName;
-  }
-
-  async openCompdataFolder(): Promise<void> {
-    debugCompdataRenderer("openCompdataFolder:start");
-    const selection = await this.api.pickCompdataFolder();
-    debugCompdataRenderer("openCompdataFolder:selection", selection);
-    const folderPath = selection.folderPath;
-    if (!folderPath) {
-      debugCompdataRenderer("openCompdataFolder:canceled");
-      return;
-    }
-    try {
-      this.openingCompdataFolderPath = folderPath;
-      this.queuedCompdataLocalizationFolderPath = undefined;
-      debugCompdataRenderer("openCompdataFolder:setLoading:true", { folderPath });
-      this.loadingService.show("Opening compdata", "Reading tournament text files");
-      const result = await this.openCompdataFolderWithProgress(folderPath);
-      debugCompdataRenderer("openCompdataFolder:result", {
-        canceled: result.canceled,
-        hasProject: Boolean(result.project),
-        error: result.error
-      });
-
-      if (!result.project) {
-        debugCompdataRenderer("openCompdataFolder:noProject");
+      const parent = this.tree.object(this.compdataProject, request.locationId);
+      if (!parent || parent.kind < 0 || parent.kind > 2) {
+        this.toast.show("Choose a valid Country, Confederation or World/FIFA location from compobj.txt.", "error");
         return;
       }
+      resolvedParentId = parent.id;
+    }
 
-      this.loadingService.show("LOC Reference", "Please select LOC XML and DB/.loc when prompted");
-      await new Promise(resolve => setTimeout(resolve, 350));
+    if (request.locationType === 2) {
+      this.applyCountryWeatherRequest(request, resolvedParentId);
+    }
 
-      const locPromise = this.api.openCompdataLocalizationReference();
-
-      const locTimer = setTimeout(() => {
-        this.loadingService.show("Reading LOC Database", "Please wait... this may take up to 30 seconds");
-      }, 800);
-
-      const locResult = await locPromise;
-      clearTimeout(locTimer);
-
-      this.compdataProject = result.project;
-      this.compdataReferenceProject = undefined;
-      this.selectedCompdataCompetitionId = result.project.competitions[0]?.id ?? 0;
-
-      if (locResult.referenceProject) {
-        this.compdataReferenceProject = locResult.referenceProject;
-        this.statusChanged.emit(`${result.project.title} loaded / ${this.compdataReferenceLabel} localization`);
-      } else {
-        const reason = locResult.warnings?.[0] ?? "LOC reference was not loaded";
-        this.statusChanged.emit(`${result.project.title} loaded without LOC reference. ${reason}`);
+    maxId++;
+    const tournamentId = maxId;
+    this.compdataProject.objects.push({ id: tournamentId, kind: 3, shortName: request.internalCode, description: request.nameKey, parentId: resolvedParentId });
+    this.compdataProject.compIds.push(tournamentId);
+    
+    if (request.template === "league") {
+      maxId++;
+      const phaseId = maxId;
+      this.compdataProject.objects.push({ id: phaseId, kind: 4, shortName: "S1", description: "FCE_League_Stage", parentId: tournamentId });
+      const leagueGroups = request.leagueGroups || 1;
+      const leagueTeams = request.leagueTeams || 20;
+      for (let i = 0; i < leagueGroups; i++) {
+        maxId++;
+        const groupId = maxId;
+        this.compdataProject.objects.push({ id: groupId, kind: 5, shortName: `G${i + 1}`, description: "", parentId: phaseId });
+        this.tree.createStandingsForGroup(this.compdataProject, groupId, leagueTeams);
       }
+    } else if (request.template === "empty") {
+      // no phases
+    } else if (request.template === "groupStage") {
+      maxId++;
+      const phaseId = maxId;
+      this.compdataProject.objects.push({ id: phaseId, kind: 4, shortName: "S1", description: "FCE_Group_Stage", parentId: tournamentId });
+      const groupStageGroups = request.groupStageGroups || 8;
+      const groupStageTeams = request.groupStageTeams || 4;
+      for (let i = 0; i < groupStageGroups; i++) {
+        maxId++;
+        const groupId = maxId;
+        this.compdataProject.objects.push({ id: groupId, kind: 5, shortName: `G${i + 1}`, description: "", parentId: phaseId });
+        this.tree.createStandingsForGroup(this.compdataProject, groupId, groupStageTeams);
+      }
+    } else if (request.template === "cup") {
+      const cupInitialTeams = request.cupInitialTeams || 16;
+      const phasesToCreate: Array<{key: string, slots: number, teamsPerSlot: number}> = [
+        { key: "FCE_Setup_Stage", slots: 1, teamsPerSlot: cupInitialTeams }
+      ];
+      if (cupInitialTeams >= 16) phasesToCreate.push({ key: "FCE_Round_1", slots: 8, teamsPerSlot: 2 });
+      if (cupInitialTeams >= 8) phasesToCreate.push({ key: "FCE_Quarter_Finals", slots: 4, teamsPerSlot: 2 });
+      if (cupInitialTeams >= 4) phasesToCreate.push({ key: "FCE_Semi_Finals", slots: 2, teamsPerSlot: 2 });
+      if (cupInitialTeams >= 2) phasesToCreate.push({ key: "FCE_Final", slots: 1, teamsPerSlot: 2 });
 
-      if (result.project.warnings.length > 0) {
-        this.toastService.show(result.project.warnings[0], "warn");
-      }
-      if (locResult.warnings && locResult.warnings.length > 0) {
-        this.toastService.show(locResult.warnings[0], "warn");
-      }
-      debugCompdataRenderer("openCompdataFolder:projectApplied", {
-        title: result.project.title,
-        competitions: result.project.competitions.length,
-        objects: result.project.objects.length
+      let currentPhaseIdx = 1;
+      phasesToCreate.forEach((phase) => {
+        maxId++;
+        const phaseId = maxId;
+        this.compdataProject!.objects.push({ id: phaseId, kind: 4, shortName: `S${currentPhaseIdx}`, description: String(phase.key), parentId: tournamentId });
+        currentPhaseIdx++;
+        for (let index = 0; index < phase.slots; index++) {
+          maxId++;
+          const groupId = maxId;
+          this.compdataProject!.objects.push({ id: groupId, kind: 5, shortName: `G${index + 1}`, description: "", parentId: phaseId });
+          this.tree.createStandingsForGroup(this.compdataProject!, groupId, phase.teamsPerSlot);
+        }
       });
+    }
 
-      this.changeDetector.detectChanges();
+    this.applyRulesRequest(request, tournamentId);
 
+    if (request.initialTeams && request.initialTeams.length > 0) {
+      request.initialTeams.forEach((tid, index) => {
+        this.compdataProject!.initTeams.push({
+          competitionId: tournamentId,
+          position: index,
+          teamId: tid
+        });
+      });
+    }
 
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error("[compdata/renderer] openCompdataFolder:error", error);
-      this.toastService.show(message, "error");
-      this.statusChanged.emit("Error");
-    } finally {
-      this.openingCompdataFolderPath = undefined;
-      this.loadingService.hide();
+    if (request.teamSources?.rules.length) {
+      for (const rule of request.teamSources.rules) {
+        this.compdataProject.tasks.push({
+          competitionId: tournamentId,
+          timing: rule.timing,
+          action: rule.action,
+          targetId: rule.targetId,
+          param1: rule.param1,
+          param2: rule.param2,
+          param3: rule.param3
+        });
+      }
+    }
+
+    if (request.advancements && request.advancements.length > 0) {
+      this.compdataProject!.advancements.push(...request.advancements);
+    }
+
+    if (request.calendar) {
+      const phases = this.compdataProject.objects.filter((object) => object.kind === 4 && object.parentId === tournamentId);
+      const phaseByCode = new Map(phases.map((phase) => [phase.shortName.toUpperCase(), phase]));
+      for (const rule of request.calendar.rules) {
+        const phase = phaseByCode.get(rule.phaseCode.toUpperCase());
+        if (!phase) continue;
+        this.compdataProject.schedules.push({
+          objectId: phase.id,
+          day: this.scheduleDates.dateToDayOffset(this.scheduleDates.monthDayToDateInput(rule.month, rule.day, request.calendar.seasonBaseDate || this.scheduleDates.defaultSeasonBaseDate), request.calendar.seasonBaseDate || this.scheduleDates.defaultSeasonBaseDate),
+          round: Math.max(1, Math.trunc(Number(rule.roundNumber) || 1)),
+          minGames: Math.max(0, Math.trunc(Number(rule.minGames) || 0)),
+          maxGames: Math.max(0, Math.trunc(Number(rule.maxGames) || 0)),
+          time: this.scheduleDates.parseTimeToHHMM(rule.time)
+        });
+      }
+      for (const fixture of request.calendar.fixtures) {
+        const phase = phaseByCode.get(fixture.phaseCode.toUpperCase());
+        if (!phase) continue;
+        this.schedule.addSpecificFixture(this.compdataProject, { id: tournamentId, shortName: request.internalCode, description: request.nameKey, parentId: resolvedParentId, stages: [], groups: [], settingsCount: 0, tasksCount: 0, scheduleCount: 0, standingsCount: 0, advancementCount: 0, initTeamsCount: 0 }, {
+          phaseId: phase.id,
+          year: fixture.year,
+          date: this.scheduleDates.dateFromParts(fixture.year, fixture.month, fixture.day),
+          time: fixture.time,
+          homeTeamId: fixture.homeTeamId,
+          awayTeamId: fixture.awayTeamId
+        });
+      }
+    }
+
+    this.originalObjectIds.clear();
+    
+    // Add missing custom name implementation if there was one
+    if (request.customName) {
+      // Could push to a queue for .loc saving later, 
+      // but UI handles it as warning for now.
+    }
+    this.afterStructureChange();
+    this.selectTournament(tournamentId);
+    if (request.template === "league" && request.locationType === 2) {
+      this.activeTab = "continental";
+    }
+    this.dialog = undefined;
+    this.statusChanged.emit(newCountryCreated ? "Country and tournament structure created" : "Tournament structure created");
+  }
+
+  private applyRulesRequest(request: CreateTournamentRequest, tournamentId: number): void {
+    if (!this.compdataProject || !request.rules || request.rules.mode === "inherit") return;
+    const rules = request.rules;
+    this.settings.setSingleSetting(this.compdataProject, tournamentId, "comp_type", rules.competitionType);
+    this.settings.setSingleSetting(this.compdataProject, tournamentId, "standings_pointswin", rules.pointsWin);
+    this.settings.setSingleSetting(this.compdataProject, tournamentId, "standings_pointsdraw", rules.pointsDraw);
+    this.settings.setSingleSetting(this.compdataProject, tournamentId, "standings_pointsloss", rules.pointsLoss);
+    this.settings.setSingleSetting(this.compdataProject, tournamentId, "rule_numsubsbench", rules.substitutesBench);
+    this.settings.setSingleSetting(this.compdataProject, tournamentId, "rule_numsubsmatch", rules.substitutionsMatch);
+    this.settings.setSingleSetting(this.compdataProject, tournamentId, "schedule_seasonstartmonth", rules.seasonStartMonth);
+    this.settings.setMultiSetting(this.compdataProject, tournamentId, "standings_sort", rules.tieBreakers);
+    this.settings.setMultiSetting(this.compdataProject, tournamentId, "match_endruleko1leg", rules.knockoutEndRules);
+    if (rules.promotionCompetitionId) this.settings.setSingleSetting(this.compdataProject, tournamentId, "info_league_promo", rules.promotionCompetitionId);
+    if (rules.relegationCompetitionId) this.settings.setSingleSetting(this.compdataProject, tournamentId, "info_league_releg", rules.relegationCompetitionId);
+    if (rules.promotionPlayoffCompetitionId) this.settings.setSingleSetting(this.compdataProject, tournamentId, "schedule_forcecomp", rules.promotionPlayoffCompetitionId);
+
+    const phases = this.compdataProject.objects.filter((object) => object.kind === 4 && object.parentId === tournamentId);
+    for (const phase of phases) {
+      const stage = this.stageSettingsForPhase(phase);
+      this.settings.setSingleSetting(this.compdataProject, phase.id, "match_stagetype", stage.type);
+      if (stage.situation) {
+        this.settings.setSingleSetting(this.compdataProject, phase.id, "match_matchsituation", stage.situation);
+      }
     }
   }
 
-  private async openCompdataFolderWithProgress(folderPath: string): Promise<{ canceled?: boolean; project?: CompdataProject; error?: string }> {
-    debugCompdataRenderer("openCompdataFolderWithProgress:start", { folderPath });
-    let removeProgressListener: (() => void) | undefined;
+  private stageSettingsForPhase(phase: CompdataObject): { type: string; situation?: string } {
+    if (/setup/i.test(phase.description)) return { type: "SETUP" };
+    if (/quarter/i.test(phase.description)) return { type: "KO1LEG", situation: "QUARTER" };
+    if (/semi/i.test(phase.description)) return { type: "KO1LEG", situation: "SEMI" };
+    if (/third/i.test(phase.description)) return { type: "KO1LEG", situation: "THIRDPLACE" };
+    if (/final/i.test(phase.description)) return { type: "KO1LEG", situation: "FINAL" };
+    if (/round/i.test(phase.description)) return { type: "KO1LEG", situation: "ROUNDX" };
+    if (phase.description === "FCE_Group_Stage") return { type: "GROUP", situation: "GROUP" };
+    return { type: "LEAGUE", situation: "LEAGUE" };
+  }
 
+  private applyCountryWeatherRequest(request: CreateTournamentRequest, countryObjectId: number): void {
+    if (!this.compdataProject || request.locationType !== 2) return;
+    const country = this.tree.object(this.compdataProject, countryObjectId);
+    if (!country || country.kind !== 2) return;
+    const weatherRequest = request.countryWeather;
+    if (!weatherRequest || weatherRequest.mode === "skip") {
+      if (!this.weather.hasCompleteWeather(this.compdataProject, countryObjectId)) {
+        this.toast.show(`${this.display.objectName(country, this.compdataReferenceProject, this.compdataProject)} has no complete weather profile configured.`, "warn");
+      }
+      return;
+    }
+
+    if (weatherRequest.mode === "copy" && weatherRequest.sourceCountryObjectId) {
+      this.weather.copyFromCountry(this.compdataProject, weatherRequest.sourceCountryObjectId, countryObjectId);
+      return;
+    }
+
+    this.weather.applyPreset(this.compdataProject, countryObjectId, weatherRequest.preset ?? "temperate", "all");
+  }
+
+  openAddPhase(): void {
+    if (!this.compdataProject || !this.selectedTournamentId) return;
+    const phases = this.tree.phases(this.compdataProject, this.selectedTournamentId);
+    this.phaseDraft = { key: "FCE_League_Stage", customKey: "", code: this.nextCode(phases, "S"), childCount: 1, teamsPerChild: 20 };
+    this.dialog = "addPhase";
+  }
+
+  addPhase(): void {
+    if (!this.compdataProject || !this.selectedTournamentId || !this.effectivePhaseKey || !this.phaseDraft.code.trim()) return;
+    const phase = this.createPhase(this.selectedTournamentId, this.effectivePhaseKey, this.phaseDraft.code.trim(), Math.max(0, Math.trunc(this.phaseDraft.childCount || 0)), Math.max(0, Math.trunc(this.phaseDraft.teamsPerChild || 0)));
+    this.afterStructureChange();
+    this.dialog = undefined;
+    this.openPhase(phase.id);
+  }
+
+  openAddChild(): void {
+    if (!this.compdataProject || !this.selectedPhase) return;
+    const isKnockout = this.display.isKnockoutPhase(this.selectedPhase);
+    this.childDraft = { code: this.nextCode(this.tree.groups(this.compdataProject, this.selectedPhase.id), "G"), description: "", teams: isKnockout ? 2 : 20 };
+    this.dialog = "addChild";
+  }
+
+  addChild(): void {
+    if (!this.compdataProject || !this.selectedPhase || !this.childDraft.code.trim()) return;
+    const groupId = this.nextObjectId();
+    this.compdataProject.objects.push({ id: groupId, kind: 5, shortName: this.childDraft.code.trim(), description: this.childDraft.description.trim(), parentId: this.selectedPhase.id });
+    this.tree.createStandingsForGroup(this.compdataProject, groupId, this.childDraft.teams);
+    this.afterStructureChange();
+    this.dialog = undefined;
+  }
+
+  openEditTournament(): void {
+    const object = this.selectedTournamentObject;
+    if (!object) return;
+    this.editingObjectId = object.id;
+    this.tournamentDraft = { nameKey: object.description, code: object.shortName, parentId: object.parentId };
+    this.dialog = "editTournament";
+  }
+
+  saveTournamentEdit(): void {
+    const object = this.display.object(this.compdataProject, this.editingObjectId);
+    if (!object || !this.tournamentDraft.nameKey.trim() || !this.tournamentDraft.code.trim()) return;
+    object.description = this.tournamentDraft.nameKey.trim();
+    object.shortName = this.tournamentDraft.code.trim();
+    object.parentId = Number(this.tournamentDraft.parentId);
+    this.afterStructureChange();
+    this.dialog = undefined;
+  }
+
+  openEditPhase(id = this.selectedPhaseId): void {
+    const phase = this.display.object(this.compdataProject, id);
+    if (!phase) return;
+    this.editingObjectId = phase.id;
+    const known = PHASE_OPTIONS.some((option) => option.key === phase.description);
+    this.phaseDraft = { key: known ? phase.description : "custom", customKey: known ? "" : phase.description, code: phase.shortName, childCount: 0, teamsPerChild: 20 };
+    this.dialog = "editPhase";
+  }
+
+  savePhaseEdit(): void {
+    const phase = this.display.object(this.compdataProject, this.editingObjectId);
+    if (!phase || !this.effectivePhaseKey || !this.phaseDraft.code.trim()) return;
+    phase.description = this.effectivePhaseKey;
+    phase.shortName = this.phaseDraft.code.trim();
+    this.afterStructureChange();
+    this.dialog = undefined;
+  }
+
+  openEditPhaseQuantities(id = this.selectedPhaseId): void {
+    const phase = this.display.object(this.compdataProject, id);
+    if (!phase) return;
+    this.editingObjectId = phase.id;
+    const groups = this.tree.groups(this.compdataProject!, phase.id);
+    const groupsCount = groups.length;
+    let teamsCount = 0;
+    if (groupsCount > 0) {
+      teamsCount = this.tree.getPositionsCount(this.compdataProject!, groups[0].id);
+    } else {
+      teamsCount = this.display.isKnockoutPhase(phase) ? 2 : 20;
+    }
+    this.phaseQuantitiesDraft = { groups: groupsCount, teams: teamsCount };
+    this.dialog = "editPhaseQuantities";
+  }
+
+  savePhaseQuantitiesEdit(): void {
+    const phase = this.display.object(this.compdataProject, this.editingObjectId);
+    if (!phase || !this.compdataProject) return;
+    
+    const groups = this.tree.groups(this.compdataProject, phase.id);
+    const currentCount = groups.length;
+    const targetCount = Math.max(0, Number(this.phaseQuantitiesDraft.groups));
+    const targetTeams = Math.max(0, Number(this.phaseQuantitiesDraft.teams));
+
+    const groupsToKeep = groups.slice(0, Math.min(currentCount, targetCount));
+    for (const group of groupsToKeep) {
+      this.tree.updateStandingsForGroup(this.compdataProject, group.id, targetTeams);
+    }
+
+    if (targetCount > currentCount) {
+      let maxId = Math.max(0, ...this.compdataProject.objects.map(o => o.id));
+      for (let index = currentCount; index < targetCount; index++) {
+        maxId++;
+        const groupId = maxId;
+        this.compdataProject.objects.push({ id: groupId, kind: 5, shortName: `G${index + 1}`, description: "", parentId: phase.id });
+        this.tree.createStandingsForGroup(this.compdataProject, groupId, targetTeams);
+      }
+    } else if (targetCount < currentCount) {
+      const groupsToRemove = groups.slice(targetCount);
+      const idsToRemove = new Set(groupsToRemove.map(g => g.id));
+      this.compdataProject.objects = this.compdataProject.objects.filter(o => !idsToRemove.has(o.id));
+      this.compdataProject.standings = this.compdataProject.standings.filter(s => !idsToRemove.has(s.groupId));
+    }
+
+    this.afterStructureChange();
+    this.dialog = undefined;
+  }
+
+  openEditChild(id: number): void {
+    const child = this.display.object(this.compdataProject, id);
+    if (!child) return;
+    this.editingObjectId = child.id;
+    const teamsCount = this.compdataProject!.standings.filter(s => s.groupId === id).length;
+    this.childDraft = { code: child.shortName, description: child.description, teams: teamsCount };
+    this.dialog = "editChild";
+  }
+
+  saveChildEdit(): void {
+    const child = this.display.object(this.compdataProject, this.editingObjectId);
+    if (!child || !this.childDraft.code.trim()) return;
+    child.shortName = this.childDraft.code.trim();
+    child.description = this.childDraft.description.trim();
+    
+    this.tree.updateStandingsForGroup(this.compdataProject!, child.id, Number(this.childDraft.teams));
+
+    this.afterStructureChange();
+    this.dialog = undefined;
+  }
+
+  requestDelete(kind: DeleteTarget["kind"], id: number): void {
+    const object = this.display.object(this.compdataProject, id);
+    if (!object) return;
+    this.deleteTarget = { kind, object };
+    this.dialog = "delete";
+  }
+
+  confirmDelete(): void {
+    if (!this.compdataProject || !this.deleteTarget) return;
+    const { kind, object } = this.deleteTarget;
+    const targets = kind === "tournament" || kind === "phase" ? this.tree.tournamentObjects(this.compdataProject, object.id) : [object];
+    const ids = new Set(targets.map((target) => target.id));
+    targets.forEach((target) => { if (target.originalRawLine) this.removedOriginalLines.push(target.originalRawLine); });
+    this.compdataProject.objects = this.compdataProject.objects.filter((candidate) => !ids.has(candidate.id));
+    this.compdataProject.standings = this.compdataProject.standings.filter((s) => !ids.has(s.groupId));
+    if (kind === "tournament") {
+      this.compdataProject.compIds = this.compdataProject.compIds.filter((id) => id !== object.id);
+      this.selectedTournamentId = 0;
+      this.selectedPhaseId = 0;
+    } else if (kind === "phase") {
+      this.selectedPhaseId = 0;
+    }
+    this.afterStructureChange();
+    this.dialog = undefined;
+    this.deleteTarget = undefined;
+  }
+
+  openValidation(): void { this.dialog = "validation"; }
+  openPreview(): void { this.dialog = "preview"; }
+  closeDialog(): void { this.dialog = undefined; this.deleteTarget = undefined; }
+
+  async openCompdataFolder(): Promise<void> {
+    const selection = await this.api.pickCompdataFolder();
+    if (!selection.folderPath) return;
+    let removeListener: (() => void) | undefined;
     try {
-      removeProgressListener = this.api.onCompdataOpenProgress((progress) => {
-        debugCompdataRenderer("openCompdataFolderWithProgress:progress", progress);
-        this.applyCompdataOpenProgress(progress);
-      });
-
-      debugCompdataRenderer("openCompdataFolderWithProgress:invoke");
-      const result = await this.api.openCompdataFolder(folderPath);
-      debugCompdataRenderer("openCompdataFolderWithProgress:resolved", {
-        canceled: result.canceled,
-        hasProjectJson: Boolean(result.projectJson),
-        error: result.error,
-        projectJsonBytes: result.projectJson?.length ?? 0
-      });
-
+      this.loading.show("Opening tournament files", "Reading compobj.txt");
+      removeListener = this.api.onCompdataOpenProgress((progress: CompdataOpenProgress) => this.loading.show("Opening tournament files", progress.message));
+      const result = await this.api.openCompdataFolder(selection.folderPath);
       if (!result.projectJson) {
-        return { canceled: result.canceled, error: result.error };
+        if (result.error) this.toast.show(result.error, "error");
+        return;
       }
-
-      debugCompdataRenderer("openCompdataFolderWithProgress:jsonParse:start");
-      const project = JSON.parse(result.projectJson) as CompdataProject;
-      debugCompdataRenderer("openCompdataFolderWithProgress:jsonParse:done", {
-        title: project.title,
-        competitions: project.competitions.length
-      });
-      return {
-        canceled: result.canceled,
-        error: result.error,
-        project
-      };
-    } finally {
-      debugCompdataRenderer("openCompdataFolderWithProgress:finally");
-      removeProgressListener?.();
-    }
-  }
-
-  private applyCompdataOpenProgress(progress: CompdataOpenProgress): void {
-    this.loadingService.show(
-      "Opening compdata",
-      progress.fileName ? `${progress.message} (${progress.fileName})` : progress.message
-    );
-  }
-
-  async openCompdataReferenceDatabase(withLocalization = true): Promise<void> {
-    try {
-      this.loadingService.show(
-        "Opening DB reference",
-        withLocalization ? "Reading DB/XML and LOC for names" : "Reading DB/XML for names"
-      );
-      const result = withLocalization ? await this.api.openDatabaseWithLocalization() : await this.api.openDatabase();
-      if (result.project) {
-        this.compdataReferenceProject = result.project;
-        this.statusChanged.emit(`${this.compdataReferenceLabel} loaded as read-only reference`);
-        this.selectFirstCompdataReferenceLeague();
-      }
+      this.compdataProject = JSON.parse(result.projectJson) as CompdataProject;
+      this.compdataProject.tasks ??= [];
+      this.compdataProject.settings ??= [];
+      this.compdataProject.settingsInvalidLines ??= [];
+      this.compdataProject.settingsRawLines ??= [];
+      this.compdataProject.settingsTrailingNewline ??= false;
+      this.compdataProject.specificSchedules ??= [];
+      this.compdataProject.taskInvalidLines ??= [];
+      this.compdataProject.weatherEntries ??= [];
+      this.compdataProject.weatherInvalidLines ??= [];
+      this.compdataReferenceProject = undefined;
+      this.originalObjectIds = new Set(this.compdataProject.objects.map((object) => object.id));
+      this.removedOriginalLines = [];
+      this.compdataDirty = false;
+      this.selectedTournamentId = this.compdataProject.competitions[0]?.id ?? 0;
+      this.selectedPhaseId = 0;
+      this.view = "simple";
+      this.statusChanged.emit(`${this.compdataProject.title} loaded`);
+      if (this.compdataProject.warnings.length) this.toast.show(this.compdataProject.warnings[0], "warn");
+      await this.loadTranslatedNames();
+      this.loading.show("Preparing tournament editor", "Indexing tournament structure");
+      this.tree.prime(this.compdataProject);
+      this.validation.prime(this.compdataProject, this.compdataReferenceProject);
+      this.changeDetector.detectChanges();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.toastService.show(message, "error");
-      this.statusChanged.emit("Error");
+      this.toast.show(error instanceof Error ? error.message : String(error), "error");
     } finally {
-      this.loadingService.hide();
+      removeListener?.();
+      this.loading.hide();
     }
   }
 
-  private normalizePath(path: string): string {
-    return path.replace(/\\/g, "/").toLowerCase();
-  }
-
-  private selectFirstCompdataReferenceLeague(force = false): void {
-    const options = this.compdataLeagueOptions;
-    const firstLeague = options.find((league) => !league.alreadyInCompdata) ?? options[0];
-    const currentLeagueExists = options.some((league) => league.leagueId === this.compdataBuilder.sourceLeagueId);
-    if (firstLeague && (force || !this.compdataBuilder.sourceLeagueId || !currentLeagueExists)) {
-      this.compdataBuilder.sourceLeagueId = firstLeague.leagueId;
-      this.syncCompdataBuilderFromLeague();
+  async loadTranslatedNames(): Promise<void> {
+    try {
+      this.loading.show("Loading translated names", "Select the localization reference files");
+      const result = await this.api.openCompdataLocalizationReference();
+      if (result.referenceProject) {
+        this.display.primeLocalization(result.referenceProject);
+        this.compdataReferenceProject = result.referenceProject;
+        if (this.compdataProject) {
+          this.validation.invalidate(this.compdataProject);
+          this.validation.prime(this.compdataProject, result.referenceProject);
+        }
+        this.statusChanged.emit("Translated tournament names loaded");
+      }
+      if (result.warnings.length) this.toast.show(result.warnings[0], "warn");
+    } catch (error) {
+      this.toast.show(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      this.loading.hide();
     }
   }
 
   async saveCompdata(): Promise<void> {
+    if (!this.compdataProject) return;
     try {
-      if (!this.compdataProject) {
-        return;
-      }
-      this.loadingService.show("Saving compdata", "Writing tournament text files");
+      this.loading.show("Saving tournament structure", "Writing compobj.txt");
       const result = await this.api.saveCompdata(this.compdataProject);
       this.compdataDirty = false;
+      this.originalObjectIds = new Set(this.compdataProject.objects.map((object) => object.id));
+      this.compdataProject.objects.forEach((object) => object.originalRawLine = this.display.rawLine(object));
+      this.compdataProject.settings.forEach((setting) => setting.originalRawLine = [setting.objectId, setting.key, setting.value].join(","));
+      this.compdataProject.tasks.forEach((task) => task.originalRawLine = [task.competitionId, task.timing, task.action, task.targetId, task.param1, task.param2, task.param3].join(","));
+      this.compdataProject.schedules.forEach((schedule) => schedule.originalRawLine = [schedule.objectId, schedule.day, schedule.round, schedule.minGames, schedule.maxGames, schedule.time].join(","));
+      this.compdataProject.specificSchedules?.forEach((file) => file.fixtures.forEach((fixture) => fixture.originalRawLine = [fixture.date, fixture.time, fixture.homeTeamId, fixture.awayTeamId].join(",")));
+      this.compdataProject.weatherEntries?.forEach((weather) => weather.originalRawLine = [weather.countryObjectId, weather.month, weather.dryChance, weather.rainChance, weather.snowChance, weather.overcastChance, weather.sunsetTime, weather.nightTime].join(","));
+      this.removedOriginalLines = [];
       this.statusChanged.emit(`${result.filesWritten} compdata file(s) saved`);
-      if (result.warnings.length > 0) {
-        console.warn("[saveCompdata] Warnings during save:");
-        for (const w of result.warnings) {
-          console.warn(` - ${w}`);
-        }
-        this.toastService.show(result.warnings[0], "warn");
-      }
+      if (result.warnings.length) this.toast.show(result.warnings[0], "warn");
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.toastService.show(message, "error");
-      this.statusChanged.emit("Error");
+      this.toast.show(error instanceof Error ? error.message : String(error), "error");
     } finally {
-      this.loadingService.hide();
+      this.loading.hide();
     }
   }
 
-  selectCompdataCompetition(competition: CompdataCompetitionSummary): void {
-    this.selectedCompdataCompetitionId = competition.id;
-  }
-
-  compdataCompetitionTitle(competition: CompdataCompetitionSummary): string {
-    return `${competition.shortName || `C${competition.id}`} / ${this.resolveCompdataText(competition.description || "No description")}`;
-  }
-
-  compdataSettingsForObject(objectId: number): string[] {
-    return this.compdataProject?.settings
-      .filter((setting) => setting.objectId === objectId)
-      .map((setting) => `${setting.key}: ${setting.value}`) ?? [];
-  }
-
-  compdataSettingsForSelectedObject() {
-    const object = this.selectedCompdataObject;
-    return object && this.compdataProject ? this.compdataProject.settings.filter((setting) => setting.objectId === object.id) : [];
-  }
-
-  compdataTasksForSelectedCompetition(): CompdataTask[] {
-    const competition = this.selectedCompdataCompetition;
-    return competition && this.compdataProject ? this.compdataProject.tasks.filter((task) => task.competitionId === competition.id) : [];
-  }
-
-  compdataSchedulesForSelectedCompetition(): CompdataScheduleEntry[] {
-    const competition = this.selectedCompdataCompetition;
-    if (!competition || !this.compdataProject) {
-      return [];
+  private createPhase(tournamentId: number, key: string, code: string, childCount: number, teamsPerChild: number): CompdataObject {
+    if (!this.compdataProject) throw new Error("No tournament files loaded.");
+    const phase: CompdataObject = { id: this.nextObjectId(), kind: 4, shortName: code, description: key, parentId: tournamentId };
+    this.compdataProject.objects.push(phase);
+    for (let index = 0; index < childCount; index += 1) {
+      const groupId = this.nextObjectId();
+      this.compdataProject.objects.push({ id: groupId, kind: 5, shortName: `G${index + 1}`, description: "", parentId: phase.id });
+      this.tree.createStandingsForGroup(this.compdataProject, groupId, teamsPerChild);
     }
-    const ids = new Set<number>([competition.id, ...competition.stages.map((stage) => stage.id), ...competition.groups.map((group) => group.id)]);
-    return this.compdataProject.schedules.filter((schedule) => ids.has(schedule.objectId));
+    return phase;
   }
 
-  compdataStandingsForGroup(groupId: number): CompdataStandingSlot[] {
-    return this.compdataProject?.standings.filter((standing) => standing.groupId === groupId) ?? [];
+  private nextObjectId(): number {
+    return Math.max(0, ...(this.compdataProject?.objects.map((object) => object.id) ?? [0])) + 1;
   }
 
-  syncCompdataBuilderFromLeague(): void {
-    const league = this.selectedBuilderLeague;
-    if (!league) {
-      return;
-    }
-    this.compdataBuilder.name = league.displayName;
-    this.compdataBuilder.assetId = league.leagueId;
-    const parentId = this.findCompdataCountryObjectId(league.countryName);
-    if (parentId !== undefined) {
-      this.compdataBuilder.parentId = String(parentId);
-    }
+  private nextCode(objects: CompdataObject[], prefix: string): string {
+    const used = new Set(objects.map((object) => object.shortName.toUpperCase()));
+    let index = 1;
+    while (used.has(`${prefix}${index}`)) index += 1;
+    return `${prefix}${index}`;
   }
 
-  createCompdataCompetitionFromBuilder(): void {
-    const compdata = this.compdataProject;
-    const league = this.selectedBuilderLeague;
-    if (!compdata) {
-      this.toastService.show("Open a compdata folder first.", "warn");
-      return;
+  private afterStructureChange(): void {
+    if (this.compdataProject) {
+      this.tree.invalidate(this.compdataProject);
+      this.validation.invalidateTournament(this.compdataProject, this.selectedTournamentId);
     }
-    if (!league) {
-      this.toastService.show("Open a DB reference and choose a source league.", "warn");
-      return;
-    }
-
-    const firstId = this.nextCompdataObjectId();
-    const assetId = this.numericDraftValue(this.compdataBuilder.assetId, Number(league.leagueId) || firstId);
-    const parentId = this.numericDraftValue(this.compdataBuilder.parentId, 0);
-    const competitionId = firstId;
-    compdata.objects.push({
-      id: competitionId,
-      kind: 3,
-      shortName: `C${assetId}`,
-      description: `TrophyName_Abbr15_${assetId}`,
-      parentId
-    });
-    compdata.compIds.push(competitionId);
-    this.addCompdataSetting(competitionId, "asset_id", String(assetId));
-    this.addCompdataSetting(competitionId, "comp_type", this.compdataBuilder.competitionType);
-    this.addCompdataSetting(competitionId, "schedule_seasonstartmonth", this.compdataBuilder.seasonStartMonth);
-    this.addCompdataSetting(competitionId, "schedule_year_start", this.compdataBuilder.seasonStartYear);
-    this.addCompdataSetting(competitionId, "schedule_year_offset", this.compdataBuilder.yearOffset ?? "0");
-    this.addCompdataSetting(competitionId, "match_matchimportance", this.compdataBuilder.competitionType === "LEAGUE" ? "17" : "80");
-
-    if (this.compdataBuilder.format === "group-knockout") {
-      this.createGroupKnockoutFormat(competitionId, league);
-    } else if (this.compdataBuilder.format === "cup") {
-      this.createCupFormat(competitionId, league);
-    } else {
-      this.createLeagueFormat(competitionId, league);
-    }
-
     this.compdataDirty = true;
-    this.refreshCompdataSummaries();
-    this.selectedCompdataCompetitionId = competitionId;
-    this.statusChanged.emit(`${league.displayName} imported as ${this.compdataBuilder.format} competition`);
+    this.refreshCompetitionSummaries();
   }
 
-  markCompdataDirty(): void {
+  afterSettingsChange(settingsCountChanged = false): void {
     this.compdataDirty = true;
-    this.refreshCompdataSummaries();
-  }
-
-  resolveCompdataText(value: string): string {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return "";
-    }
-    const localization = this.compdataReferenceProject?.localization;
-    const languageTables = localization?.tables ?? [];
-    for (const table of languageTables) {
-      const stringIdColumn = table.columns.findIndex((column) => column.toLowerCase() === "stringid");
-      const sourceTextColumn = table.columns.findIndex((column) => column.toLowerCase() === "sourcetext");
-      if (stringIdColumn < 0 || sourceTextColumn < 0) {
-        continue;
-      }
-      const row = table.rows.find((candidate) => candidate[stringIdColumn] === trimmed);
-      if (row?.[sourceTextColumn]) {
-        return row[sourceTextColumn];
-      }
-    }
-    return trimmed;
-  }
-
-  private createLeagueFormat(competitionId: number, league: CompdataReferenceLeague): void {
-    const stageId = this.nextCompdataObjectId();
-    const groupId = stageId + 1;
-    const teamsCount = Math.max(2, league.teamsCount);
-    const rounds = this.numericDraftValue(this.compdataBuilder.rounds, 2);
-    this.addCompdataObject(stageId, 4, "S1", "FCE_League_Stage", competitionId);
-    this.addCompdataObject(groupId, 5, "G1", "", stageId);
-    this.addCompdataSetting(stageId, "match_stagetype", "LEAGUE");
-    this.addCompdataSetting(stageId, "match_matchsituation", "LEAGUE");
-    this.addCompdataSetting(groupId, "num_games", String(rounds));
-    this.addCompdataSetting(groupId, "info_slot_champ", "1");
-    this.addStandings(groupId, teamsCount);
-    this.compdataProject?.tasks.push({
-      competitionId,
-      timing: "start",
-      action: "FillFromLeague",
-      targetId: groupId,
-      param1: league.leagueId,
-      param2: "0",
-      param3: "0"
-    });
-    this.compdataProject?.tasks.push({
-      competitionId,
-      timing: "end",
-      action: "UpdateLeagueTable",
-      targetId: stageId,
-      param1: league.leagueId,
-      param2: "0",
-      param3: "0"
-    });
-    const scheduleRounds = Math.max(1, (teamsCount - 1) * rounds);
-    this.addSchedule(stageId, scheduleRounds, Math.floor(teamsCount / 2), Math.floor(teamsCount / 2));
-  }
-
-  private createGroupKnockoutFormat(competitionId: number, league: CompdataReferenceLeague): void {
-    const teamsCount = Math.max(4, league.teamsCount);
-    const groupsCount = Math.max(1, this.numericDraftValue(this.compdataBuilder.groups, 4));
-    const teamsPerGroup = Math.max(2, this.numericDraftValue(this.compdataBuilder.teamsPerGroup, Math.ceil(teamsCount / groupsCount)));
-    const qualifiers = Math.max(1, this.numericDraftValue(this.compdataBuilder.qualifiersPerGroup, 2));
-    const setupStageId = this.nextCompdataObjectId();
-    const setupGroupId = setupStageId + 1;
-    const groupStageId = setupStageId + 2;
-    this.addCompdataObject(setupStageId, 4, "S1", "FCE_Setup_Stage", competitionId);
-    this.addCompdataObject(setupGroupId, 5, "G1", "", setupStageId);
-    this.addCompdataObject(groupStageId, 4, "S2", "FCE_Group_Stage", competitionId);
-    this.addCompdataSetting(setupStageId, "match_stagetype", "SETUP");
-    this.addCompdataSetting(groupStageId, "match_stagetype", "LEAGUE");
-    this.addCompdataSetting(groupStageId, "match_matchsituation", "GROUP");
-    this.addStandings(setupGroupId, teamsCount);
-
-    const groupIds: number[] = [];
-    for (let index = 0; index < groupsCount; index += 1) {
-      const groupId = groupStageId + 1 + index;
-      groupIds.push(groupId);
-      this.addCompdataObject(groupId, 5, `G${index + 1}`, `FCE_Group_${String.fromCharCode(65 + index)}`, groupStageId);
-      this.addCompdataSetting(groupId, "num_games", "1");
-      this.addStandings(groupId, teamsPerGroup);
-    }
-
-    this.compdataProject?.tasks.push({
-      competitionId,
-      timing: "start",
-      action: "FillFromLeague",
-      targetId: setupGroupId,
-      param1: league.leagueId,
-      param2: "0",
-      param3: "0"
-    });
-
-    let sourcePosition = 1;
-    for (let slot = 0; slot < groupsCount * teamsPerGroup; slot += 1) {
-      this.compdataProject?.advancements.push({
-        fromGroupId: setupGroupId,
-        fromPosition: sourcePosition,
-        toGroupId: groupIds[slot % groupsCount],
-        toPosition: Math.floor(slot / groupsCount) + 1
-      });
-      sourcePosition += 1;
-    }
-    this.addSchedule(groupStageId, Math.max(1, teamsPerGroup - 1), Math.floor((groupsCount * teamsPerGroup) / 2), Math.floor((groupsCount * teamsPerGroup) / 2));
-
-    const knockoutTeams = Math.max(2, groupsCount * qualifiers);
-    const firstKnockoutGroups = this.createKnockoutStages(competitionId, 3, knockoutTeams);
-    if (firstKnockoutGroups.length > 0) {
-      let targetIndex = 0;
-      for (const groupId of groupIds) {
-        for (let rank = 1; rank <= qualifiers; rank += 1) {
-          const targetGroupId = firstKnockoutGroups[targetIndex % firstKnockoutGroups.length];
-          this.compdataProject?.advancements.push({
-            fromGroupId: groupId,
-            fromPosition: rank,
-            toGroupId: targetGroupId,
-            toPosition: targetIndex % 2 + 1
-          });
-          targetIndex += 1;
-        }
-      }
+    if (settingsCountChanged) {
+      this.refreshCompetitionSummaries();
     }
   }
 
-  private createCupFormat(competitionId: number, league: CompdataReferenceLeague): void {
-    const teamsCount = Math.max(2, league.teamsCount);
-    const setupStageId = this.nextCompdataObjectId();
-    const setupGroupId = setupStageId + 1;
-    this.addCompdataObject(setupStageId, 4, "S1", "FCE_Setup_Stage", competitionId);
-    this.addCompdataObject(setupGroupId, 5, "G1", "", setupStageId);
-    this.addCompdataSetting(setupStageId, "match_stagetype", "SETUP");
-    this.addStandings(setupGroupId, teamsCount);
-    this.compdataProject?.tasks.push({
-      competitionId,
-      timing: "start",
-      action: "FillFromLeague",
-      targetId: setupGroupId,
-      param1: league.leagueId,
-      param2: "0",
-      param3: "0"
-    });
-
-    const firstRoundGroups = this.createKnockoutStages(competitionId, 2, teamsCount);
-    for (let index = 0; index < teamsCount; index += 1) {
-      this.compdataProject?.advancements.push({
-        fromGroupId: setupGroupId,
-        fromPosition: index + 1,
-        toGroupId: firstRoundGroups[Math.floor(index / 2)],
-        toPosition: index % 2 + 1
-      });
-    }
+  afterContinentalQualificationChange(): void {
+    this.compdataDirty = true;
+    this.refreshCompetitionSummaries();
   }
 
-  private createKnockoutStages(competitionId: number, startStageNumber: number, teamsCount: number): number[] {
-    let teamsInRound = this.highestPowerOfTwo(Math.max(2, teamsCount));
-    let stageNumber = startStageNumber;
-    let previousGroups: number[] = [];
-    let firstRoundGroups: number[] = [];
-
-    while (teamsInRound >= 2) {
-      const stageId = this.nextCompdataObjectId();
-      const groupsInStage = Math.max(1, Math.floor(teamsInRound / 2));
-      const stageDescription = this.knockoutStageDescription(teamsInRound);
-      this.addCompdataObject(stageId, 4, `S${stageNumber}`, stageDescription, competitionId);
-      this.addCompdataSetting(stageId, "match_stagetype", "KO1LEG");
-      this.addCompdataSetting(stageId, "match_matchsituation", this.knockoutSituation(teamsInRound));
-      const currentGroups: number[] = [];
-      for (let index = 0; index < groupsInStage; index += 1) {
-        const groupId = stageId + index + 1;
-        currentGroups.push(groupId);
-        this.addCompdataObject(groupId, 5, `G${index + 1}`, "", stageId);
-        this.addCompdataSetting(groupId, "num_games", "1");
-        this.addStandings(groupId, 2);
-      }
-      this.addSchedule(stageId, 1, Math.max(0, groupsInStage === 1 ? 0 : 1), groupsInStage);
-      if (firstRoundGroups.length === 0) {
-        firstRoundGroups = currentGroups;
-      }
-      if (previousGroups.length > 0) {
-        previousGroups.forEach((fromGroupId, index) => {
-          this.compdataProject?.advancements.push({
-            fromGroupId,
-            fromPosition: 1,
-            toGroupId: currentGroups[Math.floor(index / 2)],
-            toPosition: index % 2 + 1
-          });
-        });
-      }
-      previousGroups = currentGroups;
-      teamsInRound = Math.floor(teamsInRound / 2);
-      stageNumber += 1;
+  afterGlobalWeatherChange(): void {
+    if (this.compdataProject) {
+      this.tree.invalidate(this.compdataProject);
+      this.validation.invalidate(this.compdataProject);
     }
-
-    return firstRoundGroups;
+    this.compdataDirty = true;
+    this.refreshCompetitionSummaries();
   }
 
-  private addCompdataObject(id: number, kind: number, shortName: string, description: string, parentId: number): void {
-    this.compdataProject?.objects.push({ id, kind, shortName, description, parentId });
-  }
-
-  private addCompdataSetting(objectId: number, key: string, value: string): void {
-    this.compdataProject?.settings.push({ objectId, key, value });
-  }
-
-  private addStandings(groupId: number, count: number): void {
-    for (let position = 0; position < count; position += 1) {
-      this.compdataProject?.standings.push({ groupId, position });
-    }
-  }
-
-  private addSchedule(objectId: number, rounds: number, minGames: number, maxGames: number): void {
-    const startDay = this.numericDraftValue(this.compdataBuilder.startDay, 30);
-    const dayStep = this.numericDraftValue(this.compdataBuilder.dayStep, 7);
-    for (let round = 1; round <= rounds; round += 1) {
-      this.compdataProject?.schedules.push({
-        objectId,
-        day: startDay + (round - 1) * dayStep,
-        round,
-        minGames,
-        maxGames,
-        time: this.compdataBuilder.time
-      });
-    }
-  }
-
-  private nextCompdataObjectId(): number {
-    return (this.compdataProject?.objects.reduce((highest, object) => Math.max(highest, object.id), 0) ?? 0) + 1;
-  }
-
-  private numericDraftValue(value: string, fallback: number): number {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
-  }
-
-  private highestPowerOfTwo(value: number): number {
-    let output = 1;
-    while (output * 2 <= value) {
-      output *= 2;
-    }
-    return Math.max(2, output);
-  }
-
-  private knockoutStageDescription(teamsCount: number): string {
-    if (teamsCount === 2) {
-      return "FCE_Final";
-    }
-    if (teamsCount === 4) {
-      return "FCE_Semi_Finals";
-    }
-    if (teamsCount === 8) {
-      return "FCE_Quarter_Finals";
-    }
-    if (teamsCount === 16) {
-      return "FCE_Round_of_16";
-    }
-    return "FCE_Round_of_32";
-  }
-
-  private knockoutSituation(teamsCount: number): string {
-    if (teamsCount === 2) {
-      return "FINAL";
-    }
-    if (teamsCount === 4) {
-      return "SEMI";
-    }
-    if (teamsCount === 8) {
-      return "QUARTER";
-    }
-    if (teamsCount === 16) {
-      return "ROUND16";
-    }
-    return "ROUNDX";
-  }
-
-  private findCompdataCountryObjectId(countryName: string): number | undefined {
-    const normalized = countryName.toLowerCase();
-    const country = this.compdataProject?.objects.find((object) => object.kind === 2 && this.resolveCompdataText(object.description).toLowerCase() === normalized);
-    return country?.id;
-  }
-
-  private refreshCompdataSummaries(): void {
-    if (!this.compdataProject) {
-      return;
-    }
-    const byParent = new Map<number, CompdataCompetitionSummary["stages"]>();
-    for (const object of this.compdataProject.objects) {
-      const children = byParent.get(object.parentId) ?? [];
-      children.push(object);
-      byParent.set(object.parentId, children);
-    }
-    const collectIds = (rootId: number): Set<number> => {
-      const ids = new Set<number>([rootId]);
-      const stack = [...(byParent.get(rootId) ?? [])];
-      while (stack.length > 0) {
-        const object = stack.pop();
-        if (!object || ids.has(object.id)) {
-          continue;
-        }
-        ids.add(object.id);
-        stack.push(...(byParent.get(object.id) ?? []));
-      }
-      return ids;
-    };
-    this.compdataProject.competitions = this.compdataProject.compIds
-      .map((id) => {
-        const competition = this.compdataProject?.objects.find((object) => object.id === id);
-        if (!competition || !this.compdataProject) {
-          return undefined;
-        }
-        const descendantIds = collectIds(id);
-        const stages = (byParent.get(id) ?? []).filter((object) => object.kind === 4);
-        const groups = [...descendantIds]
-          .map((candidate) => this.compdataProject?.objects.find((object) => object.id === candidate))
-          .filter((object): object is CompdataCompetitionSummary["groups"][number] => Boolean(object && object.kind === 5));
-        const groupIds = new Set(groups.map((group) => group.id));
-        return {
-          id,
-          shortName: competition.shortName,
-          description: competition.description,
-          parentId: competition.parentId,
-          stages,
-          groups,
-          settingsCount: this.compdataProject.settings.filter((setting) => descendantIds.has(setting.objectId)).length,
-          tasksCount: this.compdataProject.tasks.filter((task) => task.competitionId === id).length,
-          scheduleCount: this.compdataProject.schedules.filter((schedule) => descendantIds.has(schedule.objectId)).length,
-          standingsCount: this.compdataProject.standings.filter((standing) => groupIds.has(standing.groupId)).length,
-          advancementCount: this.compdataProject.advancements.filter((advancement) => groupIds.has(advancement.fromGroupId) || groupIds.has(advancement.toGroupId)).length,
-          initTeamsCount: this.compdataProject.initTeams.filter((team) => team.competitionId === id).length
-        };
-      })
-      .filter((competition): competition is CompdataCompetitionSummary => Boolean(competition));
+  private refreshCompetitionSummaries(): void {
+    if (!this.compdataProject) return;
+    const project = this.compdataProject;
+    const competitionIds = [...new Set([...project.compIds, ...project.objects.filter((object) => object.kind === 3).map((object) => object.id)])];
+    project.competitions = competitionIds.map((id) => {
+      const competition = this.display.object(project, id);
+      if (!competition) return undefined;
+      const objects = this.tree.tournamentObjects(project, id);
+      const objectIds = new Set(objects.map((object) => object.id));
+      const stages = objects.filter((object) => object.kind === 4);
+      const groups = objects.filter((object) => object.kind === 5);
+      const stageCodes = new Set(stages.map((stage) => stage.shortName.toLowerCase()));
+      const groupIds = new Set(groups.map((group) => group.id));
+      const scheduleRulesCount = project.schedules.filter((schedule) => objectIds.has(schedule.objectId)).length;
+      const fixtureCount = (project.specificSchedules ?? [])
+        .filter((file) => file.competitionCode.toLowerCase() === competition.shortName.toLowerCase() && stageCodes.has(file.stageCode.toLowerCase()))
+        .reduce((sum, file) => sum + file.fixtures.length, 0);
+      return {
+        id,
+        shortName: competition.shortName,
+        description: competition.description,
+        parentId: competition.parentId,
+        stages,
+        groups,
+        settingsCount: project.settings.filter((setting) => objectIds.has(setting.objectId)).length,
+        tasksCount: project.tasks.filter((task) => task.competitionId === id).length,
+        scheduleCount: scheduleRulesCount + fixtureCount,
+        standingsCount: project.standings.filter((standing) => groupIds.has(standing.groupId)).length,
+        advancementCount: project.advancements.filter((advancement) => groupIds.has(advancement.fromGroupId) || groupIds.has(advancement.toGroupId)).length,
+        initTeamsCount: project.initTeams.filter((team) => team.competitionId === id).length
+      } satisfies CompdataCompetitionSummary;
+    }).filter((competition): competition is CompdataCompetitionSummary => Boolean(competition));
   }
 }

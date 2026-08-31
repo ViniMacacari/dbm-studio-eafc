@@ -46,12 +46,15 @@ export interface CompdataObject {
   shortName: string;
   description: string;
   parentId: number;
+  originalRawLine?: string;
 }
 
 export interface CompdataSetting {
   objectId: number;
   key: string;
   value: string;
+  originalRawLine?: string;
+  sourceLine?: number;
 }
 
 export interface CompdataTask {
@@ -62,6 +65,7 @@ export interface CompdataTask {
   param1: string;
   param2: string;
   param3: string;
+  originalRawLine?: string;
 }
 
 export interface CompdataScheduleEntry {
@@ -71,6 +75,42 @@ export interface CompdataScheduleEntry {
   minGames: number;
   maxGames: number;
   time: string;
+  originalRawLine?: string;
+}
+
+export interface CompdataSpecificFixtureEntry {
+  date: string;
+  time: string;
+  homeTeamId: string;
+  awayTeamId: string;
+  originalRawLine?: string;
+}
+
+export interface CompdataSpecificScheduleFile {
+  fileName: string;
+  competitionCode: string;
+  stageCode: string;
+  year: number;
+  fixtures: CompdataSpecificFixtureEntry[];
+}
+
+export interface CompdataWeatherEntry {
+  countryObjectId: number;
+  month: number;
+  dryChance: number;
+  rainChance: number;
+  snowChance: number;
+  overcastChance: number;
+  sunsetTime: string;
+  nightTime: string;
+  originalRawLine?: string;
+}
+
+export interface CompdataInvalidRawLine {
+  lineNumber: number;
+  rawLine: string;
+  reason: string;
+  sourceLine?: number;
 }
 
 export interface CompdataStandingSlot {
@@ -112,11 +152,18 @@ export interface CompdataProject {
   objects: CompdataObject[];
   compIds: number[];
   settings: CompdataSetting[];
+  settingsInvalidLines?: CompdataInvalidRawLine[];
+  settingsRawLines?: string[];
+  settingsTrailingNewline?: boolean;
   tasks: CompdataTask[];
+  taskInvalidLines: CompdataInvalidRawLine[];
   schedules: CompdataScheduleEntry[];
+  specificSchedules: CompdataSpecificScheduleFile[];
   standings: CompdataStandingSlot[];
   advancements: CompdataAdvancement[];
   initTeams: CompdataInitTeam[];
+  weatherEntries: CompdataWeatherEntry[];
+  weatherInvalidLines: CompdataInvalidRawLine[];
   weatherRows: string[][];
   activeTeamsRows: string[][];
   objectiveRows: string[][];

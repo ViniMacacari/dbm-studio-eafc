@@ -1,10 +1,8 @@
 import { CommonModule } from "@angular/common";
 import { Component, EventEmitter, Input, OnChanges, Output, SimpleChanges, ElementRef, HostListener } from "@angular/core";
+import { filterInputListOptions, InputListOption } from "./input-list-options";
 
-export interface InputListOption {
-  value: string;
-  label: string;
-}
+export type { InputListOption } from "./input-list-options";
 
 @Component({
   selector: "app-input-list",
@@ -12,7 +10,7 @@ export interface InputListOption {
   imports: [CommonModule],
   styleUrl: "./input-list.component.scss",
   template: `
-    <div class="input-list-container" [class.open]="isOpen" [class.disabled]="disabled">
+    <div class="input-list-container" [class.open]="isOpen" [class.disabled]="disabled" [class.inline]="inlineDropdown">
       <div 
         class="input-list-trigger" 
         (click)="toggleOpen($event)" 
@@ -24,15 +22,30 @@ export interface InputListOption {
       </div>
 
       <div class="input-list-dropdown" *ngIf="isOpen" role="listbox">
+        <div class="input-list-search" *ngIf="searchable">
+          <input
+            type="search"
+            [value]="searchQuery"
+            [placeholder]="searchPlaceholder"
+            (input)="onSearch($event)"
+            (keydown.escape)="close()"
+            (click)="$event.stopPropagation()"
+            autofocus
+          />
+        </div>
         <button
-          *ngFor="let option of options; let index = index; trackBy: trackByOption"
+          *ngFor="let option of filteredOptions; trackBy: trackByOption"
           type="button"
           role="option"
           [class.active]="option.value === value"
           (mousedown)="selectOption(option, $event)"
         >
-          <span>{{ option.label }}</span>
+          <span class="option-copy">
+            <strong>{{ option.label }}</strong>
+            <small *ngIf="option.detail">{{ option.detail }}</small>
+          </span>
         </button>
+        <div class="input-list-empty" *ngIf="filteredOptions.length === 0">{{ emptyText }}</div>
       </div>
     </div>
   `
@@ -42,10 +55,16 @@ export class InputListComponent implements OnChanges {
   @Input() options: InputListOption[] = [];
   @Input() placeholder = "Select option";
   @Input() disabled = false;
+  @Input() searchable = false;
+  @Input() searchPlaceholder = "Search...";
+  @Input() emptyText = "No options found.";
+  @Input() inlineDropdown = false;
   @Output() valueChange = new EventEmitter<string>();
 
   displayLabel = "";
   isOpen = false;
+  searchQuery = "";
+  filteredOptions: InputListOption[] = [];
 
   constructor(private readonly elementRef: ElementRef) {}
 
@@ -53,17 +72,22 @@ export class InputListComponent implements OnChanges {
     if (changes["value"] || changes["options"]) {
       this.syncDisplayLabel();
     }
+    if (changes["options"]) {
+      this.resetFilter();
+    }
   }
 
   toggleOpen(event: MouseEvent): void {
     if (this.disabled) return;
     this.isOpen = !this.isOpen;
+    if (this.isOpen) this.resetFilter();
   }
 
   onKeydown(event: KeyboardEvent): void {
     if (this.disabled) return;
     if (event.key === "Enter" || event.key === " ") {
       this.isOpen = !this.isOpen;
+      if (this.isOpen) this.resetFilter();
       event.preventDefault();
     } else if (event.key === "Escape") {
       this.isOpen = false;
@@ -87,6 +111,17 @@ export class InputListComponent implements OnChanges {
     this.valueChange.emit(option.value);
   }
 
+  onSearch(event: Event): void {
+    const query = (event.target as HTMLInputElement).value;
+    if (query === this.searchQuery) return;
+    this.searchQuery = query;
+    this.filteredOptions = filterInputListOptions(this.options, query);
+  }
+
+  close(): void {
+    this.isOpen = false;
+  }
+
   trackByOption(_index: number, option: InputListOption): string {
     return option.value;
   }
@@ -94,5 +129,10 @@ export class InputListComponent implements OnChanges {
   private syncDisplayLabel(): void {
     const matched = this.options.find(opt => opt.value === this.value);
     this.displayLabel = matched ? matched.label : this.value;
+  }
+
+  private resetFilter(): void {
+    this.searchQuery = "";
+    this.filteredOptions = this.options;
   }
 }

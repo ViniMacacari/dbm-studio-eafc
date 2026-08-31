@@ -9,6 +9,7 @@ import { NationService } from "../../services/nation.service";
 import { PlayerEditorService } from "../../services/player-editor.service";
 import { TeamEditorService } from "../../services/team-editor.service";
 import { ProjectService } from "../../services/project.service";
+import { TableRowClipboardService } from "../../services/table-row-clipboard.service";
 import { ToastService } from "../../services/toast.service";
 import { LoadingService } from "../../services/loading.service";
 
@@ -46,7 +47,6 @@ export class TableWorkspaceComponent implements AfterViewInit {
   pageSize = 100;
   selectedColumnIndex = 0;
   selectedRows = new Set<number>();
-  copied?: { tableName: string; rows: string[][] };
   sort?: { column: number; direction: 1 | -1 };
   tableFilter = "";
   searchTerm = "";
@@ -60,6 +60,7 @@ export class TableWorkspaceComponent implements AfterViewInit {
     private readonly nations: NationService,
     private readonly playerEditor: PlayerEditorService,
     private readonly teamEditor: TeamEditorService,
+    private readonly tableRowClipboard: TableRowClipboardService,
     private readonly toastService: ToastService,
     private readonly loadingService: LoadingService
   ) {}
@@ -104,7 +105,7 @@ export class TableWorkspaceComponent implements AfterViewInit {
   }
 
   get canPaste(): boolean {
-    return this.hasTable && Boolean(this.copied);
+    return this.hasTable && this.tableRowClipboard.hasRows;
   }
 
   get canReplace(): boolean {
@@ -336,27 +337,28 @@ export class TableWorkspaceComponent implements AfterViewInit {
       this.toastService.show("Select at least one row.", "warn");
       return;
     }
-    this.copied = { tableName: table.name, rows };
+    this.tableRowClipboard.copy(table.name, rows);
     this.setStatus(`${rows.length} row(s) copied`);
   }
 
   pasteRows(replace = false): void {
     const table = this.currentTable();
-    if (!table || !this.copied) {
+    const copied = this.tableRowClipboard.read();
+    if (!table || !copied) {
       return;
     }
-    if (this.copied.tableName !== table.name) {
+    if (copied.tableName !== table.name) {
       this.toastService.show("Copied rows belong to another table.", "warn");
       return;
     }
     if (replace) {
       this.deleteRows(false);
     }
-    table.rows.push(...this.copied.rows.map((row) => [...row]));
+    table.rows.push(...copied.rows);
     table.changed = true;
     this.invalidateTableCaches(table);
     this.syncHorizontalScrollbar();
-    this.setStatus(`${this.copied.rows.length} row(s) pasted`);
+    this.setStatus(`${copied.rows.length} row(s) pasted`);
   }
 
   addRow(): void {

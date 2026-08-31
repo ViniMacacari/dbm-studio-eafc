@@ -1,475 +1,336 @@
-<section class="player-editor-page compdata-editor-page">
-  <header class="player-editor-header">
-    <button type="button" class="back-button" (click)="showHome.emit()">Home</button>
-    <div class="player-title">
-      <span class="player-kicker">Compdata Editor</span>
-      <h2>{{ compdataProject ? compdataProject.title : 'Tournament Workspace' }}</h2>
-      <div class="player-meta" *ngIf="compdataProject">
-        <span>{{ compdataProject.competitions.length }} competitions</span>
-        <span>{{ compdataProject.objects.length }} objects</span>
-        <span>{{ compdataProject.tasks.length }} tasks</span>
+<section class="tse-editor">
+  <header class="tse-topbar">
+    <div class="tse-topbar-title">
+      <button type="button" (click)="showHome.emit()">Home</button>
+      <div>
+        <h1>Tournament Editor</h1><span>Tournament files</span>
       </div>
     </div>
-    <div class="editor-actions">
-      <button type="button" class="secondary-apply-button" (click)="openCompdataFolder()">Open TXT</button>
-      <button type="button" class="secondary-apply-button" (click)="openCompdataReferenceDatabase(false)">Load DB</button>
-      <button type="button" class="secondary-apply-button" (click)="openCompdataReferenceDatabase(true)">Load DB + LOC</button>
-      <button type="button" class="apply-button" [disabled]="!compdataProject || !compdataDirty" (click)="saveCompdata()">Save TXT</button>
+    <div class="tse-topbar-actions">
+      <div class="tse-view-switch" *ngIf="compdataProject">
+        <button type="button" [class.active]="view === 'simple'" (click)="view = 'simple'">Simple View</button>
+        <button type="button" [class.active]="view === 'advanced'" (click)="view = 'advanced'">Advanced View</button>
+      </div>
+      <button type="button" *ngIf="compdataProject" [class.tse-toolbar-active]="activeTab === 'weather'"
+        (click)="openGlobalWeather()">Global Weather</button>
+      <button type="button" (click)="openCompdataFolder()">Open Tournament Files</button>
+      <button type="button" [disabled]="!compdataProject" (click)="loadTranslatedNames()">Load Translated Names</button>
+      <button type="button" class="tse-primary" [disabled]="!compdataProject || !compdataDirty"
+        (click)="saveCompdata()">Save Changes</button>
     </div>
   </header>
 
-  <ng-container *ngIf="compdataProject; else noProject">
-    <div class="compdata-body-layout" style="display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 100px);">
-      <!-- LEFT SIDEBAR -->
-      <aside class="compdata-sidebar" style="border-right: 1px solid var(--line); overflow-y: auto; display: flex; flex-direction: column;">
-        <div style="padding: 16px;">
-          <button type="button" class="apply-button" style="width: 100%; margin-bottom: 12px;" (click)="selectedCompdataCompetitionId = 0; setTab('builder')">
-            + Novo Torneio (Builder)
-          </button>
-          <div class="field-block">
-            <span>Filter competitions</span>
-            <input class="filter-input" placeholder="Search..." [(ngModel)]="compdataCompetitionFilter" />
-          </div>
+  <div class="tse-scope-note" *ngIf="compdataProject">Tournament data uses several files. Weather is global by country and can affect every competition played there.</div>
+
+  <ng-container *ngIf="compdataProject as project; else noProject">
+    <div class="tse-simple-layout" *ngIf="view === 'simple'; else advanced">
+      <app-tournament-sidebar [project]="project" [reference]="compdataReferenceProject"
+        [selectedId]="selectedTournamentId" (selectTournament)="selectTournament($event)"
+        (createTournament)="openCreateWizard()"></app-tournament-sidebar>
+
+      <main class="tse-main">
+        <div class="tse-loc-note" *ngIf="!compdataReferenceProject">
+          <span><strong>Translated names not loaded.</strong> You can still edit the structure, but names may appear as
+            localization keys.</span>
+          <button type="button" (click)="loadTranslatedNames()">Load Translated Names</button>
         </div>
-        <div class="compdata-list" style="flex: 1; overflow-y: auto; padding: 0 16px 16px;">
-          <button
-            *ngFor="let competition of filteredCompdataCompetitions"
-            class="compdata-competition"
-            [class.active]="competition.id === selectedCompdataCompetitionId"
-            (click)="selectedCompdataCompetitionId = competition.id; setTab('summary')"
-          >
-            <strong>{{ resolveCompdataText(competition.description) }}</strong>
-            <span>{{ competition.shortName }} ({{ competition.id }})</span>
-            <small *ngIf="competition.stages.length">{{ competition.stages.length }} stages, {{ competition.groups.length }} groups</small>
-          </button>
-        </div>
-      </aside>
 
-      <!-- RIGHT MAIN AREA -->
-      <main class="compdata-main-area" style="display: flex; flex-direction: column; min-height: 0;">
-        <ng-container *ngIf="selectedCompdataCompetitionId; else showBuilderOrEmpty">
+        <app-country-weather *ngIf="activeTab === 'weather'; else tournamentEditorState" [project]="project"
+          [reference]="compdataReferenceProject" [competition]="selectedCompetition"
+          (structureChanged)="afterGlobalWeatherChange()"></app-country-weather>
 
-          <nav class="editor-tabs" aria-label="Compdata editor tabs">
-            <button type="button" [class.active]="activeTab === 'summary'" (click)="setTab('summary')">Resumo / Regras</button>
-            <button type="button" [class.active]="activeTab === 'participants'" (click)="setTab('participants')">Participantes</button>
-            <button type="button" [class.active]="activeTab === 'stages'" (click)="setTab('stages')">Fases & Grupos</button>
-            <button type="button" [class.active]="activeTab === 'matches'" (click)="setTab('matches')">Partidas & Calendário</button>
-            <button type="button" [class.active]="activeTab === 'advancements'" (click)="setTab('advancements')">Classificações</button>
-          </nav>
+        <ng-template #tournamentEditorState>
+          <app-tournament-phase-details *ngIf="selectedPhase && selectedTournamentObject; else tournamentState"
+            [project]="project" [reference]="compdataReferenceProject" [tournament]="selectedTournamentObject"
+            [phase]="selectedPhase" (back)="selectedPhaseId = 0" (addChild)="openAddChild()" (editPhase)="openEditPhase()"
+            (editQuantities)="openEditPhaseQuantities()" (deletePhase)="requestDelete('phase', selectedPhaseId)"
+            (editChild)="openEditChild($event)"
+            (deleteChild)="requestDelete('child', $event)"></app-tournament-phase-details>
 
-          <div class="player-editor-body" style="overflow-y: auto; flex: 1;">
-
-            <!-- ===== SUMMARY TAB ===== -->
-            <section class="editor-panel builder-panel" [class.hidden]="activeTab !== 'summary'">
-              <ng-container *ngIf="selectedCompdataObject as selected">
-                <div class="module-title-row">
-                  <h2>{{ resolveCompdataText(selected.description) }}</h2>
-                  <span class="module-total">ID: {{ selected.id }} · {{ selected.shortName }}</span>
-                </div>
-
-                <div class="editor-grid">
-                  <label class="field-block">
-                    <span>Nome Curto</span>
-                    <input [(ngModel)]="selected.shortName" (ngModelChange)="markDirty()" />
-                  </label>
-                  <label class="field-block">
-                    <span>Chave de Tradução</span>
-                    <input [(ngModel)]="selected.description" (ngModelChange)="markDirty()" />
-                  </label>
-                  <label class="field-block">
-                    <span>País / Região (Parent)</span>
-                    <app-search-list
-                      [options]="compdataParentOptions"
-                      [(value)]="selected.parentId"
-                      (valueChange)="markDirty()"
-                      placeholder="Pesquisar parent..."
-                    ></app-search-list>
-                  </label>
-                  <label class="field-block">
-                    <span>Liga do DB (asset_id)</span>
-                    <app-search-list
-                      [options]="compdataLeagueOptions"
-                      [value]="getSetting('asset_id')"
-                      (valueChange)="updateSetting('asset_id', $event)"
-                      placeholder="Pesquisar liga..."
-                    ></app-search-list>
-                  </label>
-                  <label class="field-block">
-                    <span>Substituições</span>
-                    <input type="number" [ngModel]="getSetting('num_subs')" (ngModelChange)="updateSetting('num_subs', $event)" />
-                  </label>
-                  <label class="field-block">
-                    <span>Jogadores no Banco</span>
-                    <input type="number" [ngModel]="getSetting('num_bench')" (ngModelChange)="updateSetting('num_bench', $event)" />
-                  </label>
-                  <label class="field-block">
-                    <span>Amarelos p/ Suspensão</span>
-                    <input type="number" [ngModel]="getSetting('yellow_cards_until_suspension')" (ngModelChange)="updateSetting('yellow_cards_until_suspension', $event)" />
-                  </label>
-                </div>
-
-                <div style="display: flex; gap: 24px; margin-top: 16px; flex-wrap: wrap;">
-                  <app-input-checkbox
-                    label="VAR ativado"
-                    description="Video Assistant Referee"
-                    [checked]="getSetting('VAR_enabled', '0') === '1'"
-                    (checkedChange)="updateSetting('VAR_enabled', $event ? '1' : '0')"
-                  ></app-input-checkbox>
-                  <app-input-checkbox
-                    label="Goal-Line Technology"
-                    description="Tecnologia na linha do gol"
-                    [checked]="getSetting('goal_line_tech_enabled', '0') === '1'"
-                    (checkedChange)="updateSetting('goal_line_tech_enabled', $event ? '1' : '0')"
-                  ></app-input-checkbox>
-                </div>
-
-                <div class="module-title-row" style="margin-top: 32px">
-                  <h3>Todas as Settings (Avançado)</h3>
-                  <span class="module-total">{{ competitionSettings.length }} settings</span>
-                </div>
-                <div class="editable-table" *ngIf="competitionSettings.length > 0">
-                  <div class="editable-row header-row" style="grid-template-columns: 80px 1fr 1fr auto;">
-                    <span>Obj ID</span>
-                    <span>Key</span>
-                    <span>Value</span>
-                    <span style="width: 76px"></span>
-                  </div>
-                  <div class="editable-row" *ngFor="let setting of competitionSettings" style="grid-template-columns: 80px 1fr 1fr auto;">
-                    <span style="padding: 8px; opacity: 0.5;">{{ setting.objectId }}</span>
-                    <input [(ngModel)]="setting.key" (ngModelChange)="markDirty()" />
-                    <input [(ngModel)]="setting.value" (ngModelChange)="markDirty()" />
-                    <button type="button" class="danger-button" style="width: 76px" (click)="removeSetting(setting)">Remover</button>
-                  </div>
-                </div>
-                <button type="button" class="secondary-apply-button" style="margin-top: 12px" (click)="addSetting()">Nova Setting</button>
-              </ng-container>
-            </section>
-
-            <!-- ===== PARTICIPANTS TAB ===== -->
-            <section class="editor-panel" [class.hidden]="activeTab !== 'participants'">
-              <div class="module-title-row">
-                <h2>Times Participantes</h2>
-                <span class="module-total">{{ competitionInitTeams.length }} times</span>
-              </div>
-
-              <div class="league-team-toolbar">
-                <app-search-list
-                  [options]="compdataTeamOptions"
-                  [(value)]="teamToAdd"
-                  placeholder="Pesquisar time para adicionar..."
-                ></app-search-list>
-                <button type="button" class="create-player-button" (click)="addInitTeam()">
-                  <span class="plus-icon" aria-hidden="true"></span>
-                  <span>Adicionar Time</span>
-                </button>
-              </div>
-
-              <div class="league-team-list" *ngIf="competitionInitTeams.length > 0; else noLeagueTeams">
-                <div class="league-team-row" *ngFor="let team of competitionInitTeams" style="grid-template-columns: minmax(180px, 1fr) 100px auto;">
-                  <div class="league-team-main">
-                    <strong>{{ resolveTeamName(team.teamId) }}</strong>
-                    <span>ID {{ team.teamId }}</span>
-                  </div>
-                  <label class="inline-field">
-                    <span>Pos.</span>
-                    <input type="number" [(ngModel)]="team.position" (ngModelChange)="markDirty()" />
-                  </label>
-                  <button type="button" class="danger-button" (click)="removeInitTeam(team)">Remover</button>
-                </div>
-              </div>
-
-              <ng-template #noLeagueTeams>
-                <div class="empty-state module-empty">
-                  <strong>Nenhum time inscrito.</strong>
-                </div>
-              </ng-template>
-            </section>
-
-            <!-- ===== STAGES & GROUPS TAB ===== -->
-            <section class="editor-panel" [class.hidden]="activeTab !== 'stages'">
-              <div class="module-title-row">
-                <h2>Fases & Grupos</h2>
-                <span class="module-total">{{ selectedCompdataCompetition?.stages?.length ?? 0 }} fases, {{ selectedCompdataCompetition?.groups?.length ?? 0 }} grupos</span>
-              </div>
-
-              <div class="compdata-detail" *ngIf="compdataStageSettings.length > 0; else noStages">
-                <div class="compdata-section" *ngFor="let data of compdataStageSettings" style="margin-bottom: 24px; border: 1px solid var(--line); border-radius: 8px; padding: 16px;">
-                  <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
-                    <strong style="font-size: 1.05rem;">{{ data.stage.shortName }}</strong>
-                    <span style="opacity: 0.6; font-size: 0.85rem;">{{ resolveCompdataText(data.stage.description) }}</span>
-                    <span style="opacity: 0.4; font-size: 0.8rem;">ID: {{ data.stage.id }}</span>
-                  </div>
-
-                  <div *ngIf="data.groups.length > 0" style="margin-left: 8px;">
-                    <div class="editable-table">
-                      <div class="editable-row header-row" style="grid-template-columns: 60px 120px 1fr;">
-                        <span>ID</span>
-                        <span>Nome</span>
-                        <span>Descrição</span>
-                      </div>
-                      <div class="editable-row" *ngFor="let group of data.groups" style="grid-template-columns: 60px 120px 1fr;">
-                        <span style="padding: 8px; opacity: 0.5;">{{ group.id }}</span>
-                        <input [(ngModel)]="group.shortName" (ngModelChange)="markDirty()" />
-                        <input [(ngModel)]="group.description" (ngModelChange)="markDirty()" placeholder="Description ID" />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div *ngIf="data.settings.length > 0" style="margin-top: 8px; margin-left: 8px;">
-                    <small style="opacity: 0.5;">Settings: {{ data.settings.join(' · ') }}</small>
-                  </div>
-                </div>
-              </div>
-
-              <ng-template #noStages>
-                <div class="empty-state module-empty">
-                  <strong>Nenhuma fase cadastrada.</strong>
-                </div>
-              </ng-template>
-            </section>
-
-            <!-- ===== MATCHES & SCHEDULE TAB ===== -->
-            <section class="editor-panel" [class.hidden]="activeTab !== 'matches'">
-              <div class="module-title-row">
-                <h2>Partidas & Calendário</h2>
-                <span class="module-total">{{ competitionSchedules.length }} entradas</span>
-              </div>
-
-              <div class="league-team-toolbar">
-                <button type="button" class="create-player-button" (click)="addScheduleEntry()">
-                  <span class="plus-icon" aria-hidden="true"></span>
-                  <span>Nova Rodada/Data</span>
-                </button>
-              </div>
-
-              <div class="editable-table" *ngIf="competitionSchedules.length > 0; else noSchedules">
-                <div class="editable-row header-row" style="grid-template-columns: 80px 1fr 80px 80px 80px 80px auto;">
-                  <span>Dia</span>
-                  <span>Grupo/Fase</span>
-                  <span>Rodada</span>
-                  <span>Min</span>
-                  <span>Max</span>
-                  <span>Horário</span>
-                  <span style="width: 76px"></span>
-                </div>
-                <div class="editable-row" *ngFor="let schedule of competitionSchedules" style="grid-template-columns: 80px 1fr 80px 80px 80px 80px auto;">
-                  <input type="number" [(ngModel)]="schedule.day" (ngModelChange)="markDirty()" />
-                  <span style="padding: 8px; opacity: 0.6; font-size: 0.85rem;">{{ resolveObjectName(schedule.objectId) }}</span>
-                  <input type="number" [(ngModel)]="schedule.round" (ngModelChange)="markDirty()" />
-                  <input type="number" [(ngModel)]="schedule.minGames" (ngModelChange)="markDirty()" />
-                  <input type="number" [(ngModel)]="schedule.maxGames" (ngModelChange)="markDirty()" />
-                  <input [(ngModel)]="schedule.time" (ngModelChange)="markDirty()" placeholder="2000" />
-                  <button type="button" class="danger-button" style="width: 76px" (click)="removeScheduleEntry(schedule)">Remover</button>
-                </div>
-              </div>
-
-              <ng-template #noSchedules>
-                <div class="empty-state module-empty">
-                  <strong>Nenhuma data cadastrada para esta competição.</strong>
-                </div>
-              </ng-template>
-
-              <div class="module-title-row" style="margin-top: 32px">
-                <h3>Condições Climáticas</h3>
-                <span class="module-total">Probabilidades por mês</span>
-              </div>
-              <div class="editable-table" *ngIf="compdataProject">
-                <div class="editable-row header-row" style="grid-template-columns: 1fr 1fr 1fr 1fr 1fr 1fr;">
-                  <span>Comp ID</span>
-                  <span>Month</span>
-                  <span>Day %</span>
-                  <span>Night %</span>
-                  <span>Clear %</span>
-                  <span>Rain %</span>
-                </div>
-                <div class="editable-row" *ngFor="let row of compdataProject.weatherRows" style="grid-template-columns: 1fr 1fr 1fr 1fr 1fr 1fr;">
-                  <input [(ngModel)]="row[0]" (ngModelChange)="markDirty()" />
-                  <input [(ngModel)]="row[1]" (ngModelChange)="markDirty()" />
-                  <input [(ngModel)]="row[2]" (ngModelChange)="markDirty()" />
-                  <input [(ngModel)]="row[3]" (ngModelChange)="markDirty()" />
-                  <input [(ngModel)]="row[4]" (ngModelChange)="markDirty()" />
-                  <input [(ngModel)]="row[5]" (ngModelChange)="markDirty()" />
-                </div>
-              </div>
-            </section>
-
-            <!-- ===== ADVANCEMENTS TAB ===== -->
-            <section class="editor-panel" [class.hidden]="activeTab !== 'advancements'">
-              <div class="module-title-row">
-                <h2>Classificações & Avanço</h2>
-                <span class="module-total">{{ competitionAdvancements.length }} regras de avanço</span>
-              </div>
-
-              <div class="league-team-toolbar">
-                <button type="button" class="create-player-button" (click)="addAdvancement()">
-                  <span class="plus-icon" aria-hidden="true"></span>
-                  <span>Nova Regra de Avanço</span>
-                </button>
-              </div>
-
-              <div class="editable-table" *ngIf="competitionAdvancements.length > 0; else noAdvancements">
-                <div class="editable-row header-row" style="grid-template-columns: 1fr 80px 1fr 80px auto;">
-                  <span>Grupo Origem</span>
-                  <span>Pos.</span>
-                  <span>Destino</span>
-                  <span>Pos. Dest.</span>
-                  <span style="width: 76px"></span>
-                </div>
-                <div class="editable-row" *ngFor="let adv of competitionAdvancements" style="grid-template-columns: 1fr 80px 1fr 80px auto;">
-                  <span style="padding: 8px; opacity: 0.6; font-size: 0.85rem;">{{ resolveObjectName(adv.fromGroupId) }}</span>
-                  <input type="number" [(ngModel)]="adv.fromPosition" (ngModelChange)="markDirty()" />
-                  <div>
-                    <app-search-list
-                      [options]="compdataParentOptions"
-                      [(value)]="adv.toGroupId"
-                      (valueChange)="markDirty()"
-                      placeholder="Destino..."
-                    ></app-search-list>
-                  </div>
-                  <input type="number" [(ngModel)]="adv.toPosition" (ngModelChange)="markDirty()" />
-                  <button type="button" class="danger-button" style="width: 76px" (click)="removeAdvancement(adv)">Remover</button>
-                </div>
-              </div>
-
-              <ng-template #noAdvancements>
-                <div class="empty-state module-empty">
-                  <strong>Nenhuma regra de avanço.</strong>
-                </div>
-              </ng-template>
-
-              <div class="module-title-row" style="margin-top: 32px">
-                <h3>Standings (Vagas de Posição)</h3>
-                <span class="module-total">{{ competitionStandings.length }} slots</span>
-              </div>
-
-              <div class="league-team-toolbar">
-                <button type="button" class="create-player-button" (click)="addStanding()">
-                  <span class="plus-icon" aria-hidden="true"></span>
-                  <span>Novo Slot</span>
-                </button>
-              </div>
-
-              <div class="editable-table" *ngIf="competitionStandings.length > 0; else noStandings">
-                <div class="editable-row header-row" style="grid-template-columns: 1fr 100px auto;">
-                  <span>Grupo</span>
-                  <span>Posição</span>
-                  <span style="width: 76px"></span>
-                </div>
-                <div class="editable-row" *ngFor="let standing of competitionStandings" style="grid-template-columns: 1fr 100px auto;">
-                  <span style="padding: 8px; opacity: 0.6; font-size: 0.85rem;">{{ resolveObjectName(standing.groupId) }}</span>
-                  <input type="number" [(ngModel)]="standing.position" (ngModelChange)="markDirty()" />
-                  <button type="button" class="danger-button" style="width: 76px" (click)="removeStanding(standing)">Remover</button>
-                </div>
-              </div>
-
-              <ng-template #noStandings>
-                <div class="empty-state module-empty">
-                  <strong>Nenhum slot criado.</strong>
-                </div>
-              </ng-template>
-            </section>
-
+          <ng-template #tournamentState>
+          <div class="tse-tab-bar" *ngIf="selectedCompetition">
+            <button type="button" class="tse-tab" [class.active]="activeTab === 'structure'"
+              (click)="activeTab = 'structure'">Structure</button>
+            <button type="button" class="tse-tab" [class.active]="activeTab === 'teams'"
+              (click)="activeTab = 'teams'">Teams / Seeding</button>
+            <button type="button" class="tse-tab" [class.active]="activeTab === 'sources'"
+              (click)="activeTab = 'sources'">Team Sources</button>
+            <button type="button" class="tse-tab" [class.active]="activeTab === 'rules'"
+              (click)="activeTab = 'rules'">Rules & Settings</button>
+            <button type="button" class="tse-tab" [class.active]="activeTab === 'continental'"
+              (click)="activeTab = 'continental'">Continental Qualification</button>
+            <button type="button" class="tse-tab" [class.active]="activeTab === 'advancement'"
+              (click)="activeTab = 'advancement'">Advancement</button>
+            <button type="button" class="tse-tab" [class.active]="activeTab === 'calendar'"
+              (click)="activeTab = 'calendar'">Calendar</button>
           </div>
-        </ng-container>
 
-        <!-- BUILDER OR EMPTY -->
-        <ng-template #showBuilderOrEmpty>
-          <div class="player-editor-body" style="overflow-y: auto; flex: 1;">
-            <section class="editor-panel builder-panel" *ngIf="activeTab === 'builder'; else noSelection">
-              <div class="module-title-row">
-                <h2>New Tournament Builder</h2>
-                <span class="module-total">Generate standard tournament structures</span>
-              </div>
-              <div class="editor-grid">
-                <label class="field-block">
-                  <span>Source league from DB</span>
-                  <app-search-list
-                    [options]="compdataLeagueOptions"
-                    [(value)]="compdataBuilder.sourceLeagueId"
-                    (valueChange)="syncCompdataBuilderFromLeague()"
-                    placeholder="Pesquise uma liga..."
-                  ></app-search-list>
-                </label>
-                <label class="field-block">
-                  <span>Competition name</span>
-                  <input [(ngModel)]="compdataBuilder.name" placeholder="Tournament name" />
-                </label>
-                <label class="field-block">
-                  <span>Asset ID</span>
-                  <input [(ngModel)]="compdataBuilder.assetId" />
-                </label>
-                <label class="field-block">
-                  <span>Parent</span>
-                  <app-search-list
-                    [options]="compdataParentOptions"
-                    [(value)]="compdataBuilder.parentId"
-                    placeholder="Pesquise um parent..."
-                  ></app-search-list>
-                </label>
-                <label class="field-block">
-                  <span>Format</span>
-                  <app-search-list
-                    [options]="[{value:'league',label:'League'},{value:'group-knockout',label:'Groups + Knockout'},{value:'cup',label:'Knockout Cup'}]"
-                    [(value)]="compdataBuilder.format"
-                  ></app-search-list>
-                </label>
-                <label class="field-block">
-                  <span>Type</span>
-                  <app-search-list
-                    [options]="[{value:'LEAGUE',label:'League'},{value:'CUP',label:'Cup'},{value:'INTERCUP',label:'International Cup'},{value:'PLAYOFF',label:'Playoff'}]"
-                    [(value)]="compdataBuilder.competitionType"
-                  ></app-search-list>
-                </label>
-                <label class="field-block">
-                  <span>Groups</span>
-                  <input type="number" min="1" [(ngModel)]="compdataBuilder.groups" />
-                </label>
-                <label class="field-block">
-                  <span>Teams/group</span>
-                  <input type="number" min="2" [(ngModel)]="compdataBuilder.teamsPerGroup" />
-                </label>
-                <label class="field-block">
-                  <span>Qualifiers/group</span>
-                  <input type="number" min="1" [(ngModel)]="compdataBuilder.qualifiersPerGroup" />
-                </label>
-                <label class="field-block">
-                  <span>Rounds</span>
-                  <input type="number" min="1" [(ngModel)]="compdataBuilder.rounds" />
-                </label>
-                <label class="field-block">
-                  <span>Start Date</span>
-                  <div style="display:flex;gap:4px">
-                    <input type="number" min="1" max="31" [(ngModel)]="compdataBuilder.startDay" placeholder="Day" />
-                    <input type="number" min="1" max="12" [(ngModel)]="compdataBuilder.seasonStartMonth" placeholder="Month" />
-                  </div>
-                </label>
-                <label class="field-block">
-                  <span>Day Step</span>
-                  <input type="number" min="1" [(ngModel)]="compdataBuilder.dayStep" />
-                </label>
-              </div>
+          <ng-container *ngIf="selectedCompetition; else selectTournamentState">
+            <app-tournament-overview *ngIf="activeTab === 'structure'" [project]="project"
+              [reference]="compdataReferenceProject" [competition]="selectedCompetition" (openPhase)="openPhase($event)"
+              (addPhase)="openAddPhase()" (edit)="openEditTournament()" (editPhase)="openEditPhase($event)"
+              (deleteTournament)="requestDelete('tournament', selectedTournamentId)"
+              (deletePhase)="requestDelete('phase', $event)" (validate)="openValidation()"
+              (preview)="openPreview()"></app-tournament-overview>
 
-              <div style="margin-top:20px;">
-                <button type="button" class="apply-button" [disabled]="!canBuild" (click)="buildTournament()">Generate Tournament Objects</button>
-              </div>
-            </section>
+            <app-tournament-teams-setup *ngIf="activeTab === 'teams'" [project]="project"
+              [referenceProject]="compdataReferenceProject" [competition]="selectedCompetition"
+              (structureChanged)="compdataDirty = true"></app-tournament-teams-setup>
 
-            <ng-template #noSelection>
-              <div class="empty-state module-empty" style="margin-top: 40px;">
-                <strong>Selecione um torneio na lista ao lado ou crie um novo pelo Builder.</strong>
-              </div>
-            </ng-template>
-          </div>
+            <app-tournament-team-sources *ngIf="activeTab === 'sources'" [project]="project"
+              [referenceProject]="compdataReferenceProject" [competition]="selectedCompetition"
+              (structureChanged)="compdataDirty = true"></app-tournament-team-sources>
+
+            <app-tournament-rules-settings *ngIf="activeTab === 'rules'" [project]="project"
+              [reference]="compdataReferenceProject" [competition]="selectedCompetition"
+              (structureChanged)="afterSettingsChange($event)"></app-tournament-rules-settings>
+
+            <app-continental-qualification *ngIf="activeTab === 'continental'" [project]="project"
+              [reference]="compdataReferenceProject" [competition]="selectedCompetition"
+              (structureChanged)="afterContinentalQualificationChange()"></app-continental-qualification>
+
+            <app-tournament-advancement *ngIf="activeTab === 'advancement'" [project]="project"
+              [referenceProject]="compdataReferenceProject" [competition]="selectedCompetition"
+              (structureChanged)="compdataDirty = true"></app-tournament-advancement>
+
+            <app-tournament-calendar *ngIf="activeTab === 'calendar'" [project]="project"
+              [referenceProject]="compdataReferenceProject" [competition]="selectedCompetition"
+              (structureChanged)="compdataDirty = true" (openCountryWeather)="openGlobalWeather()"></app-tournament-calendar>
+          </ng-container>
+
+          <ng-template #selectTournamentState>
+            <div class="tse-main-empty">
+              <strong>{{ project.competitions.length ? 'Select a tournament' : 'No tournaments found' }}</strong>
+              <span>{{ project.competitions.length ? 'Choose a tournament from the list or create a new one.' :
+                'The compobj.txt file was loaded, but no competition objects were found.' }}</span>
+              <div><button type="button" class="tse-primary" (click)="openCreateWizard()">Create
+                  Tournament</button><button type="button" (click)="view = 'advanced'">Open Advanced View</button></div>
+            </div>
+          </ng-template>
+          </ng-template>
         </ng-template>
-
       </main>
     </div>
+
+    <ng-template #advanced><app-compobj-advanced-view [project]="project"
+        [reference]="compdataReferenceProject"></app-compobj-advanced-view></ng-template>
   </ng-container>
 
   <ng-template #noProject>
-    <div class="compdata-empty">
-      <h2>Open a Compdata Folder</h2>
-      <p>Select an extracted compdata folder containing the txt files to begin editing tournaments.</p>
-    </div>
+    <main class="tse-no-project">
+      <span class="tse-file-icon">TXT</span>
+      <h2>No tournament files loaded</h2>
+      <p>Open tournament files to start editing compobj.txt.</p>
+      <button type="button" class="tse-primary" (click)="openCompdataFolder()">Open Tournament Files</button>
+    </main>
   </ng-template>
 </section>
+
+<app-create-tournament-wizard *ngIf="dialog === 'create' && compdataProject" [project]="compdataProject"
+  [reference]="compdataReferenceProject" (create)="createTournament($event)"
+  (cancel)="closeDialog()"></app-create-tournament-wizard>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'addPhase'">
+  <section class="tse-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>Tournament structure</span>
+        <h2>Add phase</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body">
+      <label class="tse-field"><span>Phase type</span><select [(ngModel)]="phaseDraft.key">
+          <option *ngFor="let option of phaseOptions" [value]="option.key">{{ option.label }}</option>
+          <option value="custom">Custom</option>
+        </select></label>
+      <label class="tse-field" *ngIf="phaseDraft.key === 'custom'"><span>Custom name key</span><input
+          [(ngModel)]="phaseDraft.customKey" placeholder="FCE_Custom_Phase" /></label>
+      <label class="tse-field"><span>Internal code</span><input [(ngModel)]="phaseDraft.code"
+          placeholder="S1" /></label>
+      <label class="tse-field"><span class="tse-capitalize">Number of {{ phaseDraftChildNoun }}</span><input
+          type="number" min="0" [(ngModel)]="phaseDraft.childCount" /></label>
+      <label class="tse-field"><span>Clubs per {{ display.childNoun({ id: 0, kind: 4, shortName: '', description:
+          phaseDraft.key, parentId: 0 }, 1) }}</span><input type="number" min="0"
+          [(ngModel)]="phaseDraft.teamsPerChild" /></label>
+      <p class="tse-field-help">{{ phaseDraftInfo.description }}</p>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" (click)="closeDialog()">Cancel</button><button type="button"
+        class="tse-primary" [disabled]="!effectivePhaseKey || !phaseDraft.code.trim()" (click)="addPhase()">Add
+        phase</button></footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'addChild' && selectedPhase">
+  <section class="tse-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>{{ display.phaseInfo(selectedPhase.description).label }}</span>
+        <h2>Add {{ display.childNoun(selectedPhase, 1) }}</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body">
+      <label class="tse-field"><span>{{ display.isGroupPhase(selectedPhase) ? 'Group code' : 'Slot code' }}</span><input
+          [(ngModel)]="childDraft.code" placeholder="G1" /></label>
+      <label class="tse-field"><span>Name key (optional)</span><input [(ngModel)]="childDraft.description"
+          placeholder="FCE_Group_A" /></label>
+      <label class="tse-field"><span>Clubs</span><input type="number" min="0" [(ngModel)]="childDraft.teams" /></label>
+      <p class="tse-field-help" *ngIf="display.isKnockoutPhase(selectedPhase)">Internally, match slots are still saved
+        as Group type 5 objects.</p>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" (click)="closeDialog()">Cancel</button><button type="button"
+        class="tse-primary" [disabled]="!childDraft.code.trim()" (click)="addChild()">Add {{
+        display.childNoun(selectedPhase, 1) }}</button></footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'editTournament' && compdataProject">
+  <section class="tse-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>Tournament</span>
+        <h2>Edit tournament</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body">
+      <label class="tse-field"><span>Tournament name key</span><input [(ngModel)]="tournamentDraft.nameKey" /></label>
+      <label class="tse-field"><span>Internal code</span><input [(ngModel)]="tournamentDraft.code" /></label>
+      <label class="tse-field"><span>Belongs to</span><select [(ngModel)]="tournamentDraft.parentId">
+          <option *ngFor="let object of locationOptions" [ngValue]="object.id">{{ display.objectName(object,
+            compdataReferenceProject, compdataProject) }}</option>
+        </select></label>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" (click)="closeDialog()">Cancel</button><button type="button"
+        class="tse-primary" [disabled]="!tournamentDraft.nameKey.trim() || !tournamentDraft.code.trim()"
+        (click)="saveTournamentEdit()">Save changes</button></footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'editPhase'">
+  <section class="tse-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>Phase</span>
+        <h2>Edit phase</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body">
+      <label class="tse-field"><span>Phase type</span><select [(ngModel)]="phaseDraft.key">
+          <option *ngFor="let option of phaseOptions" [value]="option.key">{{ option.label }}</option>
+          <option value="custom">Custom</option>
+        </select></label>
+      <label class="tse-field" *ngIf="phaseDraft.key === 'custom'"><span>Custom name key</span><input
+          [(ngModel)]="phaseDraft.customKey" /></label>
+      <label class="tse-field"><span>Internal code</span><input [(ngModel)]="phaseDraft.code" /></label>
+      <p class="tse-field-help">Belongs to: {{ selectedTournamentObject ? display.objectName(selectedTournamentObject,
+        compdataReferenceProject, compdataProject) : '' }}</p>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" (click)="closeDialog()">Cancel</button><button type="button"
+        class="tse-primary" [disabled]="!effectivePhaseKey || !phaseDraft.code.trim()" (click)="savePhaseEdit()">Save
+        changes</button></footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'editPhaseQuantities'">
+  <section class="tse-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>Phase</span>
+        <h2>Edit quantities</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body">
+      <label class="tse-field"><span class="tse-capitalize">Number of {{ selectedPhase ?
+          display.childNoun(selectedPhase, 2) : 'items' }}</span><input type="number" min="0"
+          [(ngModel)]="phaseQuantitiesDraft.groups" /></label>
+      <label class="tse-field"><span>Clubs per {{ selectedPhase ? display.childNoun(selectedPhase, 1) : 'item'
+          }}</span><input type="number" min="0" [(ngModel)]="phaseQuantitiesDraft.teams" /></label>
+      <p class="tse-field-help">DBM Studio will automatically create or remove objects and standings lines to match
+        these numbers.</p>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" (click)="closeDialog()">Cancel</button><button type="button"
+        class="tse-primary" (click)="savePhaseQuantitiesEdit()">Save changes</button></footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'editChild' && compdataProject">
+  <section class="tse-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>Group / match slot</span>
+        <h2>Edit item</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body">
+      <label class="tse-field"><span>Label / code</span><input [(ngModel)]="childDraft.code" /></label>
+      <label class="tse-field"><span>Name key (optional)</span><input [(ngModel)]="childDraft.description" /></label>
+      <label class="tse-field"><span>Clubs</span><input type="number" min="0" [(ngModel)]="childDraft.teams" /></label>
+      <p class="tse-field-help">Belongs to: {{ selectedPhase ? display.phaseInfo(selectedPhase.description).label : ''
+        }}</p>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" (click)="closeDialog()">Cancel</button><button type="button"
+        class="tse-primary" [disabled]="!childDraft.code.trim()" (click)="saveChildEdit()">Save changes</button>
+    </footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'delete' && deleteTarget">
+  <section class="tse-modal tse-confirm" role="alertdialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>Confirm deletion</span>
+        <h2>{{ deleteTarget.kind === 'tournament' ? 'Delete tournament structure?' : deleteTarget.kind === 'phase' ?
+          'Delete phase?' : 'Delete group / match slot?' }}</h2>
+      </div>
+    </header>
+    <div class="tse-modal-body">
+      <p *ngIf="deleteTarget.kind === 'tournament'">This will remove the tournament, its phases and its groups from
+        the structure file. It will not remove teams, calendar entries or rules from other tournament files.</p>
+      <p *ngIf="deleteTarget.kind === 'phase'">This will remove this phase and all groups or match slots inside it.</p>
+      <p *ngIf="deleteTarget.kind === 'child'">This will remove this group or match slot from the phase.</p>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" (click)="closeDialog()">Cancel</button><button type="button"
+        class="tse-danger" (click)="confirmDelete()">Delete</button></footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'validation'">
+  <section class="tse-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>Validation result</span>
+        <h2>{{ validationHeading }}</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body tse-validation-list">
+      <ng-container *ngIf="validationIssues.length; else validStructure">
+        <article *ngFor="let issue of validationIssues" [class.error]="issue.severity === 'error'"><strong>{{
+            issue.severity === 'error' ? 'Error' : 'Warning' }}</strong><span>{{ issue.message }}</span><small
+            *ngIf="issue.technical">Technical detail: {{ issue.technical }}</small></article>
+      </ng-container>
+      <ng-template #validStructure>
+        <ul class="tse-success-list">
+          <li>IDs are unique</li>
+          <li>Parents are valid</li>
+          <li>Tournament has phases</li>
+          <li>Phases have groups or slots</li>
+        </ul>
+      </ng-template>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" class="tse-primary" (click)="closeDialog()">Done</button>
+    </footer>
+  </section>
+</div>
+
+<div class="tse-modal-backdrop" *ngIf="dialog === 'preview'">
+  <section class="tse-modal tse-preview-modal" role="dialog" aria-modal="true">
+    <header class="tse-modal-header">
+      <div><span>compobj.txt preview</span>
+        <h2>Generated tournament lines</h2>
+      </div><button type="button" (click)="closeDialog()">×</button>
+    </header>
+    <div class="tse-modal-body">
+      <div class="tse-preview-summary">
+        <div><strong>{{ previewAdded }}</strong><span>Added</span></div>
+        <div><strong>{{ previewEdited }}</strong><span>Edited</span></div>
+        <div><strong>{{ previewRemoved }}</strong><span>Removed</span></div>
+        <div><strong>{{ validationIssues.length }}</strong><span>Warnings</span></div>
+      </div>
+      <div class="tse-generated-lines"><code *ngFor="let object of previewObjects">{{ display.rawLine(object) }}</code>
+      </div>
+    </div>
+    <footer class="tse-modal-actions"><button type="button" class="tse-primary" (click)="closeDialog()">Close
+        preview</button></footer>
+  </section>
+</div>

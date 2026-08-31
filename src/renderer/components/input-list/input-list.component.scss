@@ -85,6 +85,38 @@
   box-sizing: border-box;
 }
 
+.inline .input-list-dropdown {
+  position: relative;
+  top: auto;
+  margin-top: 4px;
+  box-shadow: none;
+}
+
+.input-list-search {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  border-bottom: 1px solid var(--line);
+  background: white;
+  padding: 8px;
+}
+
+.input-list-search input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfa;
+  color: var(--text);
+  padding: 0 9px;
+}
+
+.input-list-search input:focus {
+  outline: 2px solid var(--accent-2);
+  outline-offset: -2px;
+  background: white;
+}
+
 .input-list-dropdown button {
   width: 100%;
   min-height: 34px;
@@ -94,11 +126,45 @@
   border-radius: 0;
   background: white;
   text-align: left;
-  padding: 0 12px;
+  padding: 7px 12px;
   font-size: 13px;
   color: var(--text);
   cursor: pointer;
   outline: none;
+}
+
+.option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.option-copy strong,
+.option-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.option-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.option-copy small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.input-list-dropdown button.active .option-copy small {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.input-list-empty {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  padding: 18px 12px;
 }
 
 .input-list-dropdown button:hover {

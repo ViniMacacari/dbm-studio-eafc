@@ -56,6 +56,10 @@ const test = async () => {
 
     const calleri = await service.getTone(json, "https://img.a.transfermarkt.technology/portrait/header/284727-1738840512.jpg?lm=1");
     assert.ok(calleri.type <= 5, `Calleri should not be classified as dark skin tone 8+, received ${calleri.type}`);
+
+    const pabloMaia = await service.getTone(json, "https://img.a.transfermarkt.technology/portrait/header/892089-1709321103.jpg?lm=1");
+    assert.ok(pabloMaia.type <= 4, `Pablo Maia should be classified as light/medium skin tone, received ${pabloMaia.type}`);
+
     console.log("Skin tone detector tests passed.");
 };
 

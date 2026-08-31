@@ -354,6 +354,21 @@ export class SkinToneDetector {
             };
         }
 
+        const isShadowedMediumLightSkin =
+            q10 <= 55 &&
+            q50 >= 95 &&
+            q50 <= 125 &&
+            q90 >= 155 &&
+            q95 >= 170;
+
+        if (isShadowedMediumLightSkin) {
+            return {
+                name: 'shadowed-medium-light-upper-band',
+                lower: 0.65,
+                upper: 0.95,
+            };
+        }
+
         const isTrueDarkSkin =
             q50 <= 68 &&
             q90 <= 105 &&

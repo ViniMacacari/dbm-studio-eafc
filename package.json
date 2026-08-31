@@ -13,9 +13,16 @@
     "start": "node scripts/run-electron.mjs",
     "dev": "npm run build && node scripts/run-electron.mjs",
     "dist": "npm run build && electron-builder",
+<<<<<<< HEAD
     "test": "npm run test:formations && npm run test:database",
     "test:formations": "tsx ./src/tests/teamFormationEditor.test.ts",
     "test:database": "tsx ./src/tests/databaseIO.test.ts",
+=======
+    "test": "npm run test:formations && npm run test:compobj && npm run test:input-list",
+    "test:formations": "tsx ./src/tests/teamFormationEditor.test.ts",
+    "test:compobj": "tsx ./src/tests/compobjServices.test.ts",
+    "test:input-list": "tsx ./src/tests/inputList.test.ts",
+>>>>>>> e71cf6951bb7e19b3be21723d0085f806270e4a7
     "test:skin-tone": "tsx ./src/tests/test.ts"
   },
   "dependencies": {
